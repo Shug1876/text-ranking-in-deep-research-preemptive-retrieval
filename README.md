@@ -5,6 +5,11 @@
 This repository contains the code for the paper [Revisiting Text Ranking in Deep Research](https://arxiv.org/abs/2602.21456).
 This work has been accepted at **SIGIR 2026**, the 49th International ACM SIGIR Conference on Research and Development in Information Retrieval.
 
+In this work, we reproduce a comprehensive set of text ranking methods in the context of deep research. Specifically, we investigate the performance of **2 deep research agents** accessing **5 retrievers** and **3 re-rankers**.
+The experiments use the agents [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) and [GLM-4.7-Flash (30B)](https://huggingface.co/zai-org/GLM-4.7-Flash).
+Retrievers are [BM25](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/okapi_trec3.pdf), [SPLADE-v3](https://huggingface.co/naver/splade-v3), [RepLLaMA](https://huggingface.co/castorini/repllama-v1-7b-lora-passage), [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B), and [ColBERTv2](https://huggingface.co/colbert-ir/colbertv2.0).
+Re-rankers are [monoT5-3B](https://huggingface.co/castorini/monot5-3b-msmarco), [RankLLaMA-7B](https://huggingface.co/castorini/rankllama-v1-7b-lora-passage), and [Rank1-7B](https://huggingface.co/jhu-clsp/rank1-7b).
+
 If you find this work useful, please consider citing:
 ```
 @inproceedings{meng2026revisiting,
@@ -14,12 +19,6 @@ If you find this work useful, please consider citing:
   year={2026}
 }
 ```
-
-In this work, we reproduce a comprehensive set of text ranking methods in the context of deep research. Specifically, we investigate the performance of **2 deep research agents** accessing **5 retrievers** and **3 re-rankers**.
-The experiments use the agents [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) and [GLM-4.7-Flash (30B)](https://huggingface.co/zai-org/GLM-4.7-Flash).
-Retrievers are [BM25](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/okapi_trec3.pdf), [SPLADE-v3](https://huggingface.co/naver/splade-v3), [RepLLaMA](https://huggingface.co/castorini/repllama-v1-7b-lora-passage), [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B), and [ColBERTv2](https://huggingface.co/colbert-ir/colbertv2.0).
-Re-rankers are [monoT5-3B](https://huggingface.co/castorini/monot5-3b-msmarco), [RankLLaMA-7B](https://huggingface.co/castorini/rankllama-v1-7b-lora-passage), and [Rank1-7B](https://huggingface.co/jhu-clsp/rank1-7b).
-
 
 ## Resources released
 
