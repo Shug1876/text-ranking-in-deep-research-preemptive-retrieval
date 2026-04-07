@@ -3,6 +3,17 @@
 ![Visitors](https://visitor-badge.laobi.icu/badge?page_id=text-ranking-in-deep-research)
 
 This repository contains the code for the paper [Revisiting Text Ranking in Deep Research](https://arxiv.org/abs/2602.21456).
+This work has been accepted at **SIGIR 2026**, the 49th International ACM SIGIR Conference on Research and Development in Information Retrieval.
+
+If you find this work useful, please consider citing:
+```
+@inproceedings{meng2026revisiting,
+  title={Revisiting Text Ranking in Deep Research},
+  author={Meng, Chuan and Ou, Litu and MacAvaney, Sean and Dalton, Jeff},
+  booktitle={Proceedings of the 49th International ACM SIGIR Conference on Research and Development in Information Retrieval},
+  year={2026}
+}
+```
 
 In this work, we reproduce a comprehensive set of text ranking methods in the context of deep research. Specifically, we investigate the performance of **2 deep research agents** accessing **5 retrievers** and **3 re-rankers**.
 The experiments use the agents [gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b) and [GLM-4.7-Flash (30B)](https://huggingface.co/zai-org/GLM-4.7-Flash).
@@ -33,7 +44,6 @@ This repository is organised into the following sections:
   - [5.2 Document corpus](#sec-index-doc)
 - [6. Decrypting encrypted runs](#sec-decrypt)
 - [7. Contact](#sec-contact)
-- [8. Citation](#sec-citation)
 
 <a id="sec-prereq"></a>
 ## 1. Prerequisites
@@ -569,16 +579,3 @@ This script will decrypt all run files locally and generate the corresponding pl
 If you have any questions or suggestions, please contact us at:
 - [Chuan Meng](https://chuanmeng.github.io/): chuan.meng@ed.ac.uk
 - [Litu Ou](https://leonard907.github.io/): litu.ou@ed.ac.uk
-
-
-<a id="sec-citation"></a>
-## 8. Citation
-If you find this work useful, please cite:
-```
-@article{meng2026revisiting,
-  title={Revisiting Text Ranking in Deep Research},
-  author={Meng, Chuan and Ou, Litu and MacAvaney, Sean and Dalton, Jeff},
-  journal={arXiv preprint arXiv:2602.21456},
-  year={2026}
-}
-```
