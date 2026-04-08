@@ -371,10 +371,6 @@ def _persist_response(
                             "output": tool_output,
                         }
                     )
-                    
-                    # Track tool usage
-                    if tool_name:
-                        tool_usage[tool_name] = tool_usage.get(tool_name, 0) + 1
             
             # Handle final content (no tool calls)
             content = item.get("content")
