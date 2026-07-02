@@ -4,19 +4,22 @@ BM25 searcher implementation using Pyserini.
 
 import json
 import logging
+import pyterrier as pt
+
+from pyterrier_pisa import PisaIndex
 from typing import Any, Dict, Optional
 
-from pyserini.search.lucene import LuceneSearcher
+# from pyserini.search.lucene import LuceneSearcher
 
 from .base import BaseSearcher
 
 from datasets import load_dataset
 
-from ..query_rewriters.q2q import QueryToQuestion
+# from ..query_rewriters.q2q import QueryToQuestion
 
-from ..rerankers.rank1 import Rank1
-from ..rerankers.monot5 import MonoT5
-from ..rerankers.rankllama import RankLlama
+# from ..rerankers.rank1 import Rank1
+# from ..rerankers.monot5 import MonoT5
+# from ..rerankers.rankllama import RankLlama
 
 import torch
 
@@ -201,13 +204,17 @@ class BM25Searcher(BaseSearcher):
         logger.info(f"Initializing BM25 searcher with index: {args.index_path}")
 
         try:
-            self.searcher = LuceneSearcher(args.index_path)
-            self.searcher.set_bm25(k1=args.k1, b=args.b)
+            index_ref = pt.terrier.TerrierIndex(
+                "/mnt/indices/browsecomp-plus-passages.terrier"
+            )
+            index = PisaIndex('/mnt/indices/browsecomp-plus-passages.pisa', text_field=['title', 'text'])
+            p = (index.bm25(k1=args.k1, b=args.b) >> index_ref.text_loader (['title', 'text']))
+            self.searcher = p % args.k
             logger.info(f"BM25 parameters set successfully with k1={args.k1} and b={args.b}")
 
-            if args.rm3:
-                self.searcher.set_rm3()
-                logger.info("RM3 query expansion initialized successfully")
+            # if args.rm3:
+            #     self.searcher.set_rm3()
+            #     logger.info("RM3 query expansion initialized successfully")
 
         except Exception as exc:
             raise ValueError(
@@ -223,99 +230,100 @@ class BM25Searcher(BaseSearcher):
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        self.query_rewriter = None
+        # self.query_rewriter = None
 
-        if args.query_rewriter_type == "q2q":
-            logger.info("Loading Q2Q rewriter: %s", args.q2q_model)
-            self.query_rewriter = QueryToQuestion(
-                model_name=args.q2q_model,
-                model_url=args.q2q_model_url,
-                max_new_tokens=args.q2q_max_new_tokens,
-            )
-            logger.info("Q2Q rewriter initialized successfully")
+        # if args.query_rewriter_type == "q2q":
+        #     logger.info("Loading Q2Q rewriter: %s", args.q2q_model)
+        #     self.query_rewriter = QueryToQuestion(
+        #         model_name=args.q2q_model,
+        #         model_url=args.q2q_model_url,
+        #         max_new_tokens=args.q2q_max_new_tokens,
+        #     )
+        #     logger.info("Q2Q rewriter initialized successfully")
 
-        self.reranker = None
-        if args.reranker_type == "monot5":
-            logger.info("Loading MonoT5 reranker: %s", args.monot5_model)
-            self.reranker = MonoT5(
-                model=args.monot5_model,
-                tok_model=args.monot5_tokenizer,
-                batch_size=args.monot5_batch_size,
-                verbose=False,
-            )
-            logger.info("MonoT5 reranker initialized successfully")
-        elif args.reranker_type == "rankllama":
-            if not args.rankllama_model:
-                raise ValueError("--rankllama-model is required for RankLlama reranking")
-            logger.info("Loading RankLlama reranker: %s", args.rankllama_model)
-            self.reranker = RankLlama(
-                model_name_or_path=args.rankllama_model,
-                tokenizer_name=args.rankllama_tokenizer,
-                lora_name_or_path=args.rankllama_lora,
-                batch_size=args.rankllama_batch_size,
-                rerank_max_len=args.rankllama_max_len,
-                query_prefix=args.rankllama_query_prefix,
-                passage_prefix=args.rankllama_passage_prefix,
-                append_eos_token=args.rankllama_append_eos,
-                fp16=args.rankllama_fp16,
-                device=self.device,
-            )
-            logger.info("RankLlama reranker initialized successfully")
-        elif args.reranker_type == "rank1":
-            if not args.rank1_model:
-                raise ValueError("--rank1-model is required for Rank1 reranking")
-            logger.info("Loading Rank1 reranker: %s", args.rank1_model)
-            self.reranker = Rank1(
-                model=args.rank1_model,
-                batch_size=args.rank1_batch_size,
-                context_size=args.rank1_context_size,
-                max_output_tokens=args.rank1_max_output_tokens,
-                device=self.device,
-                api_url=args.rank1_model_url,
-            )
-            logger.info("Rank1 reranker initialized successfully")
+        # self.reranker = None
+        # if args.reranker_type == "monot5":
+        #     logger.info("Loading MonoT5 reranker: %s", args.monot5_model)
+        #     self.reranker = MonoT5(
+        #         model=args.monot5_model,
+        #         tok_model=args.monot5_tokenizer,
+        #         batch_size=args.monot5_batch_size,
+        #         verbose=False,
+        #     )
+        #     logger.info("MonoT5 reranker initialized successfully")
+        # elif args.reranker_type == "rankllama":
+        #     if not args.rankllama_model:
+        #         raise ValueError("--rankllama-model is required for RankLlama reranking")
+        #     logger.info("Loading RankLlama reranker: %s", args.rankllama_model)
+        #     self.reranker = RankLlama(
+        #         model_name_or_path=args.rankllama_model,
+        #         tokenizer_name=args.rankllama_tokenizer,
+        #         lora_name_or_path=args.rankllama_lora,
+        #         batch_size=args.rankllama_batch_size,
+        #         rerank_max_len=args.rankllama_max_len,
+        #         query_prefix=args.rankllama_query_prefix,
+        #         passage_prefix=args.rankllama_passage_prefix,
+        #         append_eos_token=args.rankllama_append_eos,
+        #         fp16=args.rankllama_fp16,
+        #         device=self.device,
+        #     )
+        #     logger.info("RankLlama reranker initialized successfully")
+        # elif args.reranker_type == "rank1":
+        #     if not args.rank1_model:
+        #         raise ValueError("--rank1-model is required for Rank1 reranking")
+        #     logger.info("Loading Rank1 reranker: %s", args.rank1_model)
+        #     self.reranker = Rank1(
+        #         model=args.rank1_model,
+        #         batch_size=args.rank1_batch_size,
+        #         context_size=args.rank1_context_size,
+        #         max_output_tokens=args.rank1_max_output_tokens,
+        #         device=self.device,
+        #         api_url=args.rank1_model_url,
+        #     )
+        #     logger.info("Rank1 reranker initialized successfully")
 
     def search(self, query: str, k: int = 10) -> list[dict[str, Any]]:
         if not self.searcher:
             raise RuntimeError("Searcher not initialized")
 
-        if self.query_rewriter:
-            if self.args.rewrite_with_context:
-                reasoning_text = getattr(self, "last_reasoning")
-                query = self.query_rewriter.rewrite_with_context(query, reasoning_text)
-            else:
-                query = self.query_rewriter.rewrite(query)
+        # if self.query_rewriter:
+        #     if self.args.rewrite_with_context:
+        #         reasoning_text = getattr(self, "last_reasoning")
+        #         query = self.query_rewriter.rewrite_with_context(query, reasoning_text)
+        #     else:
+        #         query = self.query_rewriter.rewrite(query)
 
-        if self.reranker:
-            hits = self.searcher.search(query, self.args.reranking_depth)
-        else:
-            hits = self.searcher.search(query, k)
-
+        # if self.reranker:
+        #     hits = self.searcher.search(query, self.args.reranking_depth)
+        # else:
+        #     hits = self.searcher.search(query, k)
+        hits = self.searcher.search(query)#, k)
         retrieved_results = []
-        for hit in hits:
-            raw = json.loads(hit.lucene_document.get("raw"))
+        for _, hit in hits.iterrows():
+            # raw = json.loads(hit.lucene_document.get("raw"))
             retrieved_results.append(
-                {"docid": hit.docid, "score": hit.score, "text": raw["contents"]}
+                {"docid": hit['docno'], "score": hit['score'], "text": hit["text"]}
             )
-        
-        if not self.reranker:
-            return retrieved_results
+        return retrieved_results
+
+        # if not self.reranker:
+        #     return retrieved_results
 
         # re-ranking
-        assert len(retrieved_results)<=self.args.reranking_depth
-        candidates = retrieved_results
+        # assert len(retrieved_results)<=self.args.reranking_depth
+        # candidates = retrieved_results
 
-        texts = [item["text"] for item in candidates]
-        scores = self.reranker.score_query(query, texts)
+        # texts = [item["text"] for item in candidates]
+        # scores = self.reranker.score_query(query, texts)
 
-        reranked_pairs = sorted(
-                zip(candidates, scores), key=lambda x: x[1], reverse=True
-            )
-        reranked = [
-                {"docid": item["docid"], "score": float(score), "text": item["text"]}
-                for item, score in reranked_pairs]
+        # reranked_pairs = sorted(
+        #         zip(candidates, scores), key=lambda x: x[1], reverse=True
+        #     )
+        # reranked = [
+        #         {"docid": item["docid"], "score": float(score), "text": item["text"]}
+        #         for item, score in reranked_pairs]
 
-        return reranked[:self.args.k]
+        # return reranked[:self.args.k]
         #return results
 
     def get_document(self, docid: str) -> Optional[Dict[str, Any]]:

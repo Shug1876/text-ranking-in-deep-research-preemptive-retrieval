@@ -6,24 +6,24 @@ from enum import Enum
 
 from .base import BaseSearcher
 from .bm25_searcher import BM25Searcher
-from .splade_searcher import SpladeSearcher
-from .colbert_searcher import ColbertSearcher
-from .custom_searcher import CustomSearcher
-from .faiss_searcher import FaissSearcher, ReasonIrSearcher
+# from .splade_searcher import SpladeSearcher
+# from .colbert_searcher import ColbertSearcher
+# from .custom_searcher import CustomSearcher
+# from .faiss_searcher import FaissSearcher, ReasonIrSearcher
 
 
 class SearcherType(Enum):
     """Enum for managing available searcher types and their CLI mappings."""
 
     BM25 = ("bm25", BM25Searcher)
-    FAISS = ("faiss", FaissSearcher)
-    REASONIR = ("reasonir", ReasonIrSearcher)
-    SPLADE = ("splade", SpladeSearcher)
-    COLBERT = ("colbert", ColbertSearcher)
-    CUSTOM = (
-        "custom",
-        CustomSearcher,
-    )  # Your custom searcher class, yet to be implemented
+    # FAISS = ("faiss", FaissSearcher)
+    # REASONIR = ("reasonir", ReasonIrSearcher)
+    # SPLADE = ("splade", SpladeSearcher)
+    # COLBERT = ("colbert", ColbertSearcher)
+    # CUSTOM = (
+    #     "custom",
+    #     CustomSearcher,
+    # )  # Your custom searcher class, yet to be implemented
 
     def __init__(self, cli_name, searcher_class):
         self.cli_name = cli_name
