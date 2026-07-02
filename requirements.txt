@@ -1,0 +1,16 @@
+hydra-core
+wandb
+pandas
+tqdm
+torch
+openai
+transformers
+pyterrier
+pyterrier_pisa
+openpyxl
+ollama
+bert-score
+evaluate
+dspy
+langchain
+langchain-ollama
