@@ -1,0 +1,13 @@
+runs/
+
+evals/
+
+data/
+
+scripts_build_index/
+
+main.ipynb
+
+*.log
+
+*.pyc
