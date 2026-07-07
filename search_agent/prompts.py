@@ -20,6 +20,18 @@ Exact Answer: {{your succinct, final answer}}
 Confidence: {{your confidence score between 0% and 100% for your answer}}
 """.strip()
 
+QUERY_TEMPLATE_NO_GET_DOCUMENT_NUGGET = """
+You are a deep research agent. You need to answer the given question by interacting with a search engine, using the search tool provided. Please perform reasoning and use the tool step by step, in an interleaved manner. You may use the search tool multiple times.
+Throughout the search, you will encounter small nuggets of information. Consider these pieces of information when answering the given question.
+
+Question: {Question}
+
+Your response should be in the following format:
+Explanation: {{your explanation for your final answer. For this explanation section only, you should cite your evidence documents inline by enclosing their docids in square brackets [] at the end of sentences. For example, [20].}}
+Exact Answer: {{your succinct, final answer}}
+Confidence: {{your confidence score between 0% and 100% for your answer}}
+""".strip()
+
 QUERY_TEMPLATE_NO_GET_DOCUMENT_NO_CITATION = """
 You are a deep research agent. You need to answer the given question by interacting with a search engine, using the search tool provided. Please perform reasoning and use the tool step by step, in an interleaved manner. You may use the search tool multiple times.
 
@@ -117,8 +129,66 @@ tool_response here
 
 User: """
 
+QUERY_DECOMP_TEMPLATE = """
+You are an expert at breaking down complex, multi-part questions into simpler, self-contained subqueries.
+Your task is to analyze the given question and decompose it into a series of smaller, more manageable subqueries that, when answered together, would provide all the information needed to answer the original question.
+Guidelines:
+1. Each subquery should focus on a single piece of information or concept
+2. Subqueries MUST be completely self-contained and answerable independently - do not use pronouns or references like "this person", "the author", "these conditions", "they", "the movie", etc.
+3. Each subquery should include all necessary context and constraints from the original query, but remain concise and clear
+4. Preserve all important details and constraints from the original query
+5. Return only the subqueries as a JSON array of strings i.e. '''["subquery1", "subquery2", ...]''', without any additional text or explanation.
+Example:
+Original: "Please identify the fictional character who occasionally breaks the fourth wall with the audience, has a backstory involving help from selfless ascetics, is known for his huMor, and had a TV show that aired between the 1960s and 1980s with fewer than 50 episodes."
+Subqueries: [ "Which fictional characters occasionally break the fourth wall with the audience?", "Which fictional characters have a backstory involving help from selfless ascetics?", "Which fictional characters are known for their humor?", "Which TV shows aired between the 1960s and 1980s?", "Which TV shows had fewer than 50 episodes? ]
 
-def format_query(query: str, query_template: str | None = None) -> str:
+Additional examples of how to decompose questions are shown below:
+{examples}
+
+Please decompose this query into subqueries:
+{query}
+"""
+
+NUGGET_EXTRACT_PROMPT = """You are a helpful nugget retrieval assistant. 
+Your main task is to identify at most 5 nuggets of information from documents that are directly relevant to helping to answer a given query. 
+Focus on details that could lead to the answer of the query. Carefully examine BOTH the title AND the full body text of each document equally, as critical information can appear anywhere, 
+For every nugget you extract, always consider: how does this piece of information bring us closer to answering the user's query? 
+Ensure that each nugget is short (1-12 words), self-contained, and directly tied to the query. 
+Only extract details that serve as meaningful stepping stones toward resolving the query — whether they directly answer it, narrow down the search, or establish a key connection. 
+Do not rely on your internal knowledge, rely only on the content provided by the user and nothing else. 
+If you find there are no relevant nuggets, your response must be an empty list. 
+Your response must be given as a parameter to the 'nuggets' parameter for the 'give_nuggets' function tool.
+
+Please extract nuggets from the following documents in relation to the query below:
+{query}
+
+{docs}"""
+
+NUGGET_CAN_ANSWER = """You are a helpful assistant that answers a question based on a set of information nuggets. 
+Given a user query and a set of information nuggets, try to answer the query.
+If you cannot answer the query, respond with "I cannot answer the query based on the provided nuggets." 
+Your answer should be based solely on the content of the nuggets and the query, without relying on internal knowledge. 
+
+Query: {query}
+Nuggets: {nuggets}
+
+Your response should be in the following format:
+Can Answer: {{yes or no}}
+Explanation: {{your explanation for your final answer}}
+Exact Answer: {{your succinct, final answer}}
+Confidence: {{your confidence score between 0% and 100% for your answer}}
+"""
+
+
+def get_decomp_examples(n=3): # -> List[Dict]
+    import ast
+    import pandas as pd
+    df = pd.read_excel('search_agent/examples.xlsx').head(n=n)
+    df['decomposition'] = df['decomposition'].apply(ast.literal_eval)
+    return df.to_dict(orient='records')
+
+
+def format_query(query: str, query_template: str | None = None, docs=None) -> str:
     """Format the query with the specified template if provided."""
     if query_template is None:
         return query
@@ -128,5 +198,12 @@ def format_query(query: str, query_template: str | None = None) -> str:
         return QUERY_TEMPLATE_NO_GET_DOCUMENT.format(Question=query)
     elif query_template == "QUERY_TEMPLATE_NO_GET_DOCUMENT_NO_CITATION":
         return QUERY_TEMPLATE_NO_GET_DOCUMENT_NO_CITATION.format(Question=query)
+    elif query_template == "QUERY_DECOMP_TEMPLATE":
+        examples = get_decomp_examples(n=3)
+        return QUERY_DECOMP_TEMPLATE.format(examples=examples, query=query)
+    elif query_template == "NUGGET_EXTRACT_PROMPT":
+        return NUGGET_EXTRACT_PROMPT.format(query=query, docs=docs)
+    elif query_template == "NUGGET_CAN_ANSWER":
+        return NUGGET_CAN_ANSWER.format(query=query, nuggets=docs)
     else:
         raise ValueError(f"Unknown query template: {query_template}")
