@@ -21,14 +21,14 @@ MODEL_NAME=${MODEL##*/}
 K1=0.9
 B=0.4
 
-NUM_THREADS=50
+NUM_THREADS=1
 EVAL_NUM_THREADS=5
-REASONING_EFFORT=high
+REASONING_EFFORT=medium
 K=5
 MAX_TOKENS=40000
 SNIPPET_MAX_TOKENS=512
 
-QUERY_TEMPLATE=QUERY_TEMPLATE_NO_GET_DOCUMENT
+QUERY_TEMPLATE=QUERY_TEMPLATE_NO_GET_DOCUMENT_NUGGET
 
 QUERY_FILE=./topics-qrels/queries-all.tsv
 INDEX_PATH=./indexes/index.bm25.passage
@@ -46,8 +46,8 @@ INDEX_DIR_BASE="$(basename "${INDEX_DIR}")"
 TMP="${INDEX_DIR_BASE#index.}"               
 CORPUS_TYPE="${TMP##*.}"                              
 
-OUT_DIR=./runs/${MODEL_NAME}-${REASONING_EFFORT}/${QUERY_NAME}.bm25-k1-${K1}-b-${B}-k${K}.${CORPUS_TYPE}-psgid
-OUT_DOC_DIR=./runs/${MODEL_NAME}-${REASONING_EFFORT}/${QUERY_NAME}.bm25-k1-${K1}-b-${B}-k${K}.${CORPUS_TYPE}
+OUT_DIR=./runs/${MODEL_NAME}-${REASONING_EFFORT}-nugget/${QUERY_NAME}.bm25-k1-${K1}-b-${B}-k${K}.${CORPUS_TYPE}-psgid
+OUT_DOC_DIR=./runs/${MODEL_NAME}-${REASONING_EFFORT}-nugget/${QUERY_NAME}.bm25-k1-${K1}-b-${B}-k${K}.${CORPUS_TYPE}
 
 ############################
 # print configuration
@@ -83,7 +83,7 @@ echo "=========================================================="
 # run agent
 ############################
 
-python search_agent/oss_client.py \
+python search_agent/oss_client_nugget.py \
   --model ${MODEL} \
   --model-url ${MODEL_URL} \
   --searcher-type bm25 \

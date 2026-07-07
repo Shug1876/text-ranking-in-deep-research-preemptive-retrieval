@@ -23,7 +23,7 @@ B=0.4
 
 NUM_THREADS=50
 EVAL_NUM_THREADS=5
-REASONING_EFFORT=high
+REASONING_EFFORT=medium
 K=5
 MAX_TOKENS=40000
 SNIPPET_MAX_TOKENS=512
@@ -46,8 +46,8 @@ INDEX_DIR_BASE="$(basename "${INDEX_DIR}")"
 TMP="${INDEX_DIR_BASE#index.}"               
 CORPUS_TYPE="${TMP##*.}"                              
 
-OUT_DIR=./runs/${MODEL_NAME}-${REASONING_EFFORT}/${QUERY_NAME}.bm25-k1-${K1}-b-${B}-k${K}.${CORPUS_TYPE}-psgid
-OUT_DOC_DIR=./runs/${MODEL_NAME}-${REASONING_EFFORT}/${QUERY_NAME}.bm25-k1-${K1}-b-${B}-k${K}.${CORPUS_TYPE}
+OUT_DIR=./runs/${MODEL_NAME}-${REASONING_EFFORT}-nugget-interject/${QUERY_NAME}.bm25-k1-${K1}-b-${B}-k${K}.${CORPUS_TYPE}-psgid
+OUT_DOC_DIR=./runs/${MODEL_NAME}-${REASONING_EFFORT}-nugget-interject/${QUERY_NAME}.bm25-k1-${K1}-b-${B}-k${K}.${CORPUS_TYPE}
 
 ############################
 # print configuration
@@ -83,7 +83,7 @@ echo "=========================================================="
 # run agent
 ############################
 
-python search_agent/oss_client.py \
+python search_agent/oss_client_interject_nugget.py \
   --model ${MODEL} \
   --model-url ${MODEL_URL} \
   --searcher-type bm25 \
