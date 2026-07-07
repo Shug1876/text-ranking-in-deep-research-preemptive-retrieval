@@ -99,9 +99,7 @@ class SearchToolHandler:
     def _search(self, query: str):
         if self.last_reasoning:
             setattr(self.searcher, "last_reasoning", self.last_reasoning)
-            
         candidates = self.searcher.search(query, self.k)
-
         if self.snippet_max_tokens and self.snippet_max_tokens > 0 and self.tokenizer:
             for cand in candidates:
                 text = cand["text"]
@@ -144,10 +142,14 @@ def run_conversation_with_tools(
     initial_request: dict,
     tool_handler: SearchToolHandler,
     max_iterations: int = 100,
-    verbose: bool = False,
+    verbose: bool = True,
 ):
 
     tool_usage = {}
+
+    total_tokens = 0
+    input_tokens = 0
+    output_tokens = 0
 
     messages = initial_request["input"]
 
@@ -160,6 +162,10 @@ def run_conversation_with_tools(
             response = client.responses.create(
                 **request,
             )
+            usage = response.usage
+            total_tokens += usage.total_tokens
+            input_tokens += usage.input_tokens
+            output_tokens += usage.output_tokens
         except Exception as e:
             if verbose:
                 print(f"Error: {e}")
@@ -216,7 +222,7 @@ def run_conversation_with_tools(
         if not function_calls:
             if messages[-1]['type'] != 'message':
                 continue
-            return messages, tool_usage, "completed"
+            return messages, tool_usage, "completed", {'total tokens': total_tokens, 'input tokens': input_tokens, 'output tokens': output_tokens}
 
         new_messages = messages.copy()
 
@@ -246,7 +252,7 @@ def run_conversation_with_tools(
         messages = new_messages
         iteration += 1
 
-    return messages, tool_usage, "incomplete"
+    return messages, tool_usage, "incomplete", {'total tokens': total_tokens, 'input tokens': input_tokens, 'output tokens': output_tokens}
 
 
 def _persist_response(
@@ -254,6 +260,7 @@ def _persist_response(
     initial_request: dict,
     messages: list,
     tool_usage: dict,
+    token_counts: dict,
     status: str,
     *,
     query_id: str | None = None,
@@ -347,6 +354,9 @@ def _persist_response(
         "status": status,
         "retrieved_docids": extract_retrieved_docids_from_result(normalized_results),
         "result": normalized_results,
+        "total_tokens": token_counts['total tokens'],
+        "input_tokens": token_counts['input tokens'],
+        "output_tokens": token_counts['output tokens'],
     }
 
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
@@ -354,7 +364,7 @@ def _persist_response(
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(normalized_record, f, indent=2, default=str)
 
-    print("Saved response to", filename, "| tool call counts:", normalized_tool_counts)
+    print("Saved response to", filename, "| tool call counts:", normalized_tool_counts, "| status:", status)
 
 
 def _process_tsv_dataset(
@@ -414,7 +424,7 @@ def _process_tsv_dataset(
         }
 
         try:
-            messages, tool_usage, status = run_conversation_with_tools(
+            messages, tool_usage, status, token_counts = run_conversation_with_tools(
                 client, initial_request, tool_handler, args.max_iterations, args.verbose
             )
 
@@ -425,7 +435,7 @@ def _process_tsv_dataset(
                         pbar.set_postfix(completed=completed_count[0])
 
             _persist_response(
-                out_dir, initial_request, messages, tool_usage, status, query_id=qid
+                out_dir, initial_request, messages, tool_usage, token_counts, status, query_id=qid
             )
 
         except Exception as exc:
@@ -548,7 +558,7 @@ def main():
 
     client = openai.OpenAI(
         base_url=args.model_url,
-        api_key="EMPTY",
+        api_key=os.environ['IDA_LLM_API_KEY'],
     )
 
     searcher = searcher_class(args)
