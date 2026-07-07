@@ -1,16 +1,25 @@
 import argparse
+import logging
 import csv
 import json
 import re
+import os
 import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
+from openai import OpenAI
+from pyterrier_rag.measures import F1, EM, BERTScore
 
 import numpy as np
+import pandas as pd
+import pyterrier as pt
 from tqdm import tqdm
-from vllm import LLM, SamplingParams
+from functools import partial
+# from vllm import LLM, SamplingParams
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -37,6 +46,17 @@ correct: Answer 'yes' if extracted_final_answer matches the [correct_answer] giv
 confidence: The extracted confidence score between 0|\%| and 100|\%| from [response]. Put 100 if there is no confidence score available.
 """.strip()
 
+def evaluation_qa(result, qid, answers):
+    """Evaluate QA output."""
+    if type(result)==type(pd.DataFrame()):
+        out = pt.Evaluate(res=result, qrels=answers, metrics=[F1, EM, BERTScore(rel=1)], perquery=True)[qid]
+    else:
+        out = pt.Evaluate(res=pd.DataFrame([result]), qrels=answers, metrics=[F1, EM, BERTScore(rel=1)], perquery=True)[qid]
+    
+    f1_score = out['F1']
+    em_score = out['EM']
+    bertscore = round(out['BERTScore'], 2)
+    return f1_score, em_score, bertscore
 
 def load_ground_truth(jsonl_path: Path) -> Dict[str, Dict[str, str]]:
     gt: Dict[str, Dict[str, str]] = {}
@@ -69,84 +89,87 @@ def parse_judge_response(judge_response: str) -> dict:
     if not judge_response:
         result["parse_error"] = True
         return result
-
-    # Extract extracted_final_answer (try bold formats first, then regular)
-    answer_match = re.search(
-        r"\*\*extracted_final_answer:\*\*\s*(.*?)(?=\n|$)",
-        judge_response,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if not answer_match:
+    try:
+        # Extract extracted_final_answer (try bold formats first, then regular)
         answer_match = re.search(
-            r"\*\*extracted_final_answer\*\*:\s*(.*?)(?=\n|$)",
+            r"\*\*extracted_final_answer:\*\*\s*(.*?)(?=\n|$)",
             judge_response,
             re.IGNORECASE | re.DOTALL,
         )
-    if not answer_match:
-        answer_match = re.search(
-            r"extracted_final_answer:\s*(.*?)(?=\n|$)",
-            judge_response,
-            re.IGNORECASE | re.DOTALL,
-        )
-    if answer_match:
-        result["extracted_final_answer"] = answer_match.group(1).strip()
+        if not answer_match:
+            answer_match = re.search(
+                r"\*\*extracted_final_answer\*\*:\s*(.*?)(?=\n|$)",
+                judge_response,
+                re.IGNORECASE | re.DOTALL,
+            )
+        if not answer_match:
+            answer_match = re.search(
+                r"extracted_final_answer:\s*(.*?)(?=\n|$)",
+                judge_response,
+                re.IGNORECASE | re.DOTALL,
+            )
+        if answer_match:
+            result["extracted_final_answer"] = answer_match.group(1).strip()
 
-    # Extract reasoning/explanation
-    reasoning_match = re.search(
-        r"\*\*reasoning:\*\*\s*(.*?)(?=\n\*\*correct:\*\*|\n\*\*correct\*\*:|\ncorrect:|$)",
-        judge_response,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if not reasoning_match:
+        # Extract reasoning/explanation
         reasoning_match = re.search(
-            r"\*\*reasoning\*\*:\s*(.*?)(?=\n\*\*correct:\*\*|\n\*\*correct\*\*:|\ncorrect:|$)",
+            r"\*\*reasoning:\*\*\s*(.*?)(?=\n\*\*correct:\*\*|\n\*\*correct\*\*:|\ncorrect:|$)",
             judge_response,
             re.IGNORECASE | re.DOTALL,
         )
-    if not reasoning_match:
-        reasoning_match = re.search(
-            r"reasoning:\s*(.*?)(?=\ncorrect:|$)",
-            judge_response,
-            re.IGNORECASE | re.DOTALL,
-        )
-    if reasoning_match:
-        result["reasoning"] = reasoning_match.group(1).strip()
+        if not reasoning_match:
+            reasoning_match = re.search(
+                r"\*\*reasoning\*\*:\s*(.*?)(?=\n\*\*correct:\*\*|\n\*\*correct\*\*:|\ncorrect:|$)",
+                judge_response,
+                re.IGNORECASE | re.DOTALL,
+            )
+        if not reasoning_match:
+            reasoning_match = re.search(
+                r"reasoning:\s*(.*?)(?=\ncorrect:|$)",
+                judge_response,
+                re.IGNORECASE | re.DOTALL,
+            )
+        if reasoning_match:
+            result["reasoning"] = reasoning_match.group(1).strip()
 
-    # Extract correct (yes/no)
-    correct_match = re.search(
-        r"\*\*correct:\*\*\s*(yes|no)", judge_response, re.IGNORECASE
-    )
-    if not correct_match:
+        # Extract correct (yes/no)
         correct_match = re.search(
-            r"\*\*correct\*\*:\s*(yes|no)", judge_response, re.IGNORECASE
+            r"\*\*correct:\*\*\s*(yes|no)", judge_response, re.IGNORECASE
         )
-    if not correct_match:
-        correct_match = re.search(r"correct:\s*(yes|no)", judge_response, re.IGNORECASE)
-    if correct_match:
-        result["correct"] = correct_match.group(1).lower() == "yes"
+        if not correct_match:
+            correct_match = re.search(
+                r"\*\*correct\*\*:\s*(yes|no)", judge_response, re.IGNORECASE
+            )
+        if not correct_match:
+            correct_match = re.search(r"correct:\s*(yes|no)", judge_response, re.IGNORECASE)
+        if correct_match:
+            result["correct"] = correct_match.group(1).lower() == "yes"
 
-    # Extract confidence (percentage)
-    confidence_match = re.search(
-        r"\*\*confidence:\*\*\s*(\d+(?:\.\d+)?)\s*%?", judge_response, re.IGNORECASE
-    )
-    if not confidence_match:
+        # Extract confidence (percentage)
         confidence_match = re.search(
-            r"\*\*confidence\*\*:\s*(\d+(?:\.\d+)?)\s*%?", judge_response, re.IGNORECASE
+            r"\*\*confidence:\*\*\s*(\d+(?:\.\d+)?)\s*%?", judge_response, re.IGNORECASE
         )
-    if not confidence_match:
-        confidence_match = re.search(
-            r"confidence:\s*(\d+(?:\.\d+)?)\s*%?", judge_response, re.IGNORECASE
-        )
-    if confidence_match:
-        result["confidence"] = float(confidence_match.group(1))
-        if result["confidence"] > 100:
-            result["confidence"] = 100
+        if not confidence_match:
+            confidence_match = re.search(
+                r"\*\*confidence\*\*:\s*(\d+(?:\.\d+)?)\s*%?", judge_response, re.IGNORECASE
+            )
+        if not confidence_match:
+            confidence_match = re.search(
+                r"confidence:\s*(\d+(?:\.\d+)?)\s*%?", judge_response, re.IGNORECASE
+            )
+        if confidence_match:
+            result["confidence"] = float(confidence_match.group(1))
+            if result["confidence"] > 100:
+                result["confidence"] = 100
 
-    # Check if we got the essential fields
-    if result["correct"] is None:
+        # Check if we got the essential fields
+        if result["correct"] is None:
+            result["parse_error"] = True
+
+        return result
+    except:
         result["parse_error"] = True
-
-    return result
+        return result
 
 
 # source: https://github.com/hendrycks/outlier-exposure/blob/master/utils/calibration_tools.py
@@ -229,39 +252,41 @@ def extract_citations_from_response(response_text: str) -> List[str]:
     """
     if not response_text:
         return []
+    try:
+        # [docid]
+        single_citation_pattern = r"\[(\d+)\]"
+        single_matches = re.findall(single_citation_pattern, response_text)
 
-    # [docid]
-    single_citation_pattern = r"\[(\d+)\]"
-    single_matches = re.findall(single_citation_pattern, response_text)
+        multi_citation_pattern = r"\[([^\[\]]*?)\]"
+        multi_matches = re.findall(multi_citation_pattern, response_text)
 
-    multi_citation_pattern = r"\[([^\[\]]*?)\]"
-    multi_matches = re.findall(multi_citation_pattern, response_text)
+        # 【docid】
+        single_fullwidth_pattern = r"【(\d+)】"
+        single_fullwidth_matches = re.findall(single_fullwidth_pattern, response_text)
 
-    # 【docid】
-    single_fullwidth_pattern = r"【(\d+)】"
-    single_fullwidth_matches = re.findall(single_fullwidth_pattern, response_text)
+        multi_fullwidth_pattern = r"【([^【】]*?)】"
+        multi_fullwidth_matches = re.findall(multi_fullwidth_pattern, response_text)
 
-    multi_fullwidth_pattern = r"【([^【】]*?)】"
-    multi_fullwidth_matches = re.findall(multi_fullwidth_pattern, response_text)
+        all_docids = set()
 
-    all_docids = set()
+        all_docids.update(single_matches)
+        all_docids.update(single_fullwidth_matches)
 
-    all_docids.update(single_matches)
-    all_docids.update(single_fullwidth_matches)
+        for match in multi_matches:
+            if match in single_matches:
+                continue
+            docids = re.findall(r"\d+", match)
+            all_docids.update(docids)
 
-    for match in multi_matches:
-        if match in single_matches:
-            continue
-        docids = re.findall(r"\d+", match)
-        all_docids.update(docids)
+        for match in multi_fullwidth_matches:
+            if match in single_fullwidth_matches:
+                continue
+            docids = re.findall(r"\d+", match)
+            all_docids.update(docids)
 
-    for match in multi_fullwidth_matches:
-        if match in single_fullwidth_matches:
-            continue
-        docids = re.findall(r"\d+", match)
-        all_docids.update(docids)
-
-    return list(all_docids)
+        return list(all_docids)
+    except:
+        return []
 
 
 def load_qrel_data(qrel_path: Path) -> Dict[str, List[str]]:
@@ -374,8 +399,89 @@ def save_detailed_csv(all_results: List[dict], output_dir: Path):
     print(f"Detailed CSV results saved to {csv_path}")
     return csv_path
 
+def evaluate_item(item, qrel_evidence, df_answers, client, args, eval_lock):
+    judge_text = ""
+    try:
+        judge_text = client.chat.completions.create(
+            model=args.model,
+            messages=[{"role": "user", "content": item["judge_prompt"]}],
+            temperature=args.temperature,
+            top_p=args.top_p,
+            max_tokens=args.max_output_tokens,
+            extra_body={
+                "top_k": args.top_k,
+                "enable_thinking": False,
+            },
+        ).choices[0].message.content or ""
+    except Exception as e:
+        print(f"Error calling judge for query_id {item['query_id']}: {e}")
+        judge_text = ""
+
+    judge_result = parse_judge_response(judge_text)
+    cited_docids = extract_citations_from_response(item["response"])
+    citation_metrics_positives = compute_citation_metrics(
+        cited_docids, qrel_evidence.get(str(item["query_id"]), [])
+    )
+    if judge_result['extracted_final_answer'] is None:
+        f1_score, em_score, bertscore = 0, 0, 0
+    else:
+        with eval_lock:
+            f1_score, em_score, bertscore = evaluation_qa(
+                {'qid': str(item['query_id']), 'qanswer': judge_result['extracted_final_answer']},
+                str(item['query_id']),
+                df_answers
+            )
+
+    result = {
+        "json_path": str(item["json_path"]),
+        "query_id": item["query_id"],
+        "question": item["gt_question"],
+        "response": item["response"],
+        "correct_answer": item["correct_answer"],
+        "is_completed": True,
+        "judge_prompt": item["judge_prompt"],
+        "judge_response": judge_text,
+        "judge_result": judge_result,
+        "tool_call_counts": item["tool_call_counts"],
+        'total_tokens': item['total_tokens'],
+        'input_tokens': item['input_tokens'],
+        'output_tokens': item['output_tokens'],
+        'F1': f1_score,
+        'EM': em_score,
+        'BERTScore': bertscore,
+        "citations": {
+            "cited_docids": cited_docids,
+            "metrics": citation_metrics_positives,
+        },
+        "retrieval": {
+            "retrieved_docids": sorted(list(item["retrieved_docids_set"])),
+            "recall": item["retrieval_recall"],
+        },
+        "model_info": {
+            "judge_model": args.model,
+            "max_output_tokens": args.max_output_tokens,
+        },
+    }
+
+    try:
+        with item["eval_path"].open("w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving evaluation to {item['eval_path']}: {e}")
+
+    return result
 
 def main():
+    df = pd.read_json("./data/browsecomp_plus_decrypted.jsonl", lines=True)
+    df_answers = df[['query_id', 'answer']]
+    df_answers = df_answers.rename(columns={'answer': 'gold_answer'})
+    df_answers['text'] = df_answers['gold_answer']
+    df_answers['relevance'] = 1
+    df_answers['query_id'] = df_answers['query_id'].astype(str)
+
+    BASE_URL = "http://api.llm.apps.os.dcs.gla.ac.uk/v1"  # outside UofG network: "http://api.terrier.org/v1"
+    API_KEY = os.environ['IDA_LLM_API_KEY']
+    client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
     parser = argparse.ArgumentParser(
         description="Evaluate browsecomp responses using Qwen judge model."
     )
@@ -391,7 +497,7 @@ def main():
         "--eval_dir", default="./evals", help="Directory to store evaluation results"
     )
     parser.add_argument(
-        "--model", default="Qwen/Qwen3-32B", help="Qwen model for judging"
+        "--model", default="qwen-3-32b", help="Qwen model for judging"
     )
     parser.add_argument(
         "--temperature", type=float, default=0.7, help="Decoding temperature"
@@ -425,6 +531,12 @@ def main():
         default=1,
         help="Tensor parallel size for vLLM",
     )
+    parser.add_argument(
+        "--num-threads",
+        type=int,
+        default=10,
+        help="Number of threads",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
@@ -457,13 +569,13 @@ def main():
     all_results = []
 
     # Initialize vLLM engine and sampling params
-    llm = LLM(model=args.model, tensor_parallel_size=args.tensor_parallel_size)
-    sampling_params = SamplingParams(
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        max_tokens=args.max_output_tokens,
-    )
+    # llm = LLM(model=args.model, tensor_parallel_size=args.tensor_parallel_size)
+    # sampling_params = SamplingParams(
+    #     temperature=args.temperature,
+    #     top_p=args.top_p,
+    #     top_k=args.top_k,
+    #     max_tokens=args.max_output_tokens,
+    # )
 
     detected_model_name: Optional[str] = None
     first_run_path: Optional[Path] = json_files[0] if json_files else None
@@ -519,6 +631,10 @@ def main():
             and run_data["result"][-1]["type"] == "output_text"
         ):
             response = run_data["result"][-1]["output"]
+        
+        total_tokens = run_data['total_tokens']
+        input_tokens = run_data['input_tokens']
+        output_tokens = run_data['output_tokens']
 
         if response == "" or not is_completed:
             result = {
@@ -543,6 +659,9 @@ def main():
                     "judge_model": args.model,
                     "max_output_tokens": args.max_output_tokens,
                 },
+                'total_tokens': total_tokens,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens
             }
             try:
                 with eval_path.open("w", encoding="utf-8") as f:
@@ -565,70 +684,94 @@ def main():
                 "retrieval_recall": retrieval_recall,
                 "tool_call_counts": run_data.get("tool_call_counts", {}),
                 "judge_prompt": judge_prompt,
+                'total_tokens': total_tokens,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens
             }
         )
 
-    for i in tqdm(
-        range(0, len(pending_items), args.batch_size), desc="Evaluating", unit="batch"
-    ):
-        batch = pending_items[i : i + args.batch_size]
-        messages_list = [
-            [{"role": "user", "content": item["judge_prompt"]}] for item in batch
-        ]
-        try:
-            outputs = llm.chat(
-                messages_list,
-                sampling_params,
-                chat_template_kwargs={"enable_thinking": False},
-            )
-        except Exception as e:
-            print(f"Error running vLLM batch {i}//{args.batch_size}: {e}")
-            continue
+    results_lock = Lock()
+    eval_lock = Lock()
 
-        for item, out in zip(batch, outputs or []):
-            judge_text = ""
-            try:
-                if getattr(out, "outputs", None):
-                    judge_text = out.outputs[0].text or ""
-            except Exception:
-                judge_text = ""
+    with ThreadPoolExecutor(max_workers=args.num_threads) as executor:
+        futures = {executor.submit(evaluate_item, item, qrel_evidence, df_answers, client, args, eval_lock): item for item in pending_items}
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Evaluating", unit="query"):
+            item = futures[future]
+            result = None
+            while result is None:
+                try:
+                    result = future.result()
+                    with results_lock:
+                        all_results.append(result)
+                except Exception as e:
+                    print(f"[ERROR FOR THREAD Q{item['query_id']}] Unexpected error, retrying: {e}")
+                    result = None
 
-            judge_result = parse_judge_response(judge_text)
-            cited_docids = extract_citations_from_response(item["response"])
-            citation_metrics_positives = compute_citation_metrics(
-                cited_docids, qrel_evidence.get(str(item["query_id"]), [])
-            )
+    # for i in tqdm(
+    #     range(0, len(pending_items)), desc="Evaluating", unit="query"
+    # ):
+    #     item = pending_items[i]
+    #     judge_text = ""
+    #     try:
+    #         judge_text = client.chat.completions.create(
+    #             model=args.model,
+    #             messages=[{"role": "user", "content": item["judge_prompt"]}],
+    #             temperature=args.temperature,
+    #             top_p=args.top_p,
+    #             max_tokens=args.max_output_tokens,
+    #             extra_body={
+    #                 "top_k": args.top_k,
+    #                 "enable_thinking": False,
+    #             },
+    #         ).choices[0].message.content or ""
+    #     except Exception as e:
+    #         print(f"Error calling judge for query_id {item['query_id']}: {e}")
+    #         judge_text = ""
 
-            result = {
-                "json_path": str(item["json_path"]),
-                "query_id": item["query_id"],
-                "question": item["gt_question"],
-                "response": item["response"],
-                "correct_answer": item["correct_answer"],
-                "is_completed": True,
-                "judge_prompt": item["judge_prompt"],
-                "judge_response": judge_text,
-                "judge_result": judge_result,
-                "tool_call_counts": item["tool_call_counts"],
-                "citations": {
-                    "cited_docids": cited_docids,
-                    "metrics": citation_metrics_positives,
-                },
-                "retrieval": {
-                    "retrieved_docids": sorted(list(item["retrieved_docids_set"])),
-                    "recall": item["retrieval_recall"],
-                },
-                "model_info": {
-                    "judge_model": args.model,
-                    "max_output_tokens": args.max_output_tokens,
-                },
-            }
-            try:
-                with item["eval_path"].open("w", encoding="utf-8") as f:
-                    json.dump(result, f, indent=2, ensure_ascii=False)
-            except Exception as e:
-                print(f"Error saving evaluation to {item['eval_path']}: {e}")
-            all_results.append(result)
+    #     judge_result = parse_judge_response(judge_text)
+    #     cited_docids = extract_citations_from_response(item["response"])
+    #     citation_metrics_positives = compute_citation_metrics(
+    #         cited_docids, qrel_evidence.get(str(item["query_id"]), [])
+    #     )
+
+    #     f1_score, em_score, bertscore = evaluation_qa({'qid': str(item['query_id']), 'qanswer': judge_result['extracted_final_answer']}, str(item['query_id']), df_answers)
+
+    #     result = {
+    #         "json_path": str(item["json_path"]),
+    #         "query_id": item["query_id"],
+    #         "question": item["gt_question"],
+    #         "response": item["response"],
+    #         "correct_answer": item["correct_answer"],
+    #         "is_completed": True,
+    #         "judge_prompt": item["judge_prompt"],
+    #         "judge_response": judge_text,
+    #         "judge_result": judge_result,
+    #         "tool_call_counts": item["tool_call_counts"],
+    #         'total_tokens': item['total_tokens'],
+    #         'input_tokens': item['input_tokens'],
+    #         'output_tokens': item['output_tokens'],
+    #         'F1': f1_score,
+    #         'EM': em_score,
+    #         'BERTScore': bertscore,
+    #         "citations": {
+    #             "cited_docids": cited_docids,
+    #             "metrics": citation_metrics_positives,
+    #         },
+    #         "retrieval": {
+    #             "retrieved_docids": sorted(list(item["retrieved_docids_set"])),
+    #             "recall": item["retrieval_recall"],
+    #         },
+    #         "model_info": {
+    #             "judge_model": args.model,
+    #             "max_output_tokens": args.max_output_tokens,
+    #         },
+    #     }
+    #     try:
+    #         with item["eval_path"].open("w", encoding="utf-8") as f:
+    #             json.dump(result, f, indent=2, ensure_ascii=False)
+    #     except Exception as e:
+    #         print(f"Error saving evaluation to {item['eval_path']}: {e}")
+        # all_results.append(result)
 
     print(f"\nProcessed {len(all_results)} evaluations")
 
@@ -686,6 +829,37 @@ def main():
         float(np.mean(retrieval_recalls)) if len(retrieval_recalls) > 0 else None
     )
 
+    f1_scores = [r.get("F1", 0.0) for r in all_results]
+    f1_avg = (
+        float(np.mean(f1_scores)) if len(f1_scores) > 0 else None
+    )
+
+    em_scores = [r.get("EM", 0.0) for r in all_results]
+    em_avg = (
+        float(np.mean(em_scores)) if len(em_scores) > 0 else None
+    )
+
+    bert_scores = [r.get("BERTScore", 0.0) for r in all_results]
+    bert_avg = (
+        float(np.mean(bert_scores)) if len(bert_scores) > 0 else None
+    )
+
+    # ERROR: not finding token counts, might need to rerun results to fix
+    ttl_tokens = [r.get("total_tokens", 0.0) for r in all_results]
+    ttl_tokens_avg = (
+        float(np.mean(ttl_tokens)) if len(ttl_tokens) > 0 else None
+    )
+
+    inp_tokens = [r.get("input_tokens", 0.0) for r in all_results]
+    inp_tokens_avg = (
+        float(np.mean(inp_tokens)) if len(inp_tokens) > 0 else None
+    )
+
+    out_tokens = [r.get("output_tokens", 0.0) for r in all_results]
+    out_tokens_avg = (
+        float(np.mean(out_tokens)) if len(out_tokens) > 0 else None
+    )
+
     total = len(all_results)
     correct_count = sum(
         1 for r in all_results if r.get("judge_result", {}).get("correct", False)
@@ -697,6 +871,37 @@ def main():
         if isinstance(retrieval_recall_avg, (int, float))
         else None
     )
+    f1_percent = (
+        round(f1_avg, 4)
+        if isinstance(f1_avg, (int, float))
+        else None
+    )
+    em_percent = (
+        round(em_avg, 4)
+        if isinstance(em_avg, (int, float))
+        else None
+    )
+    bert_percent = (
+        round(bert_avg, 4)
+        if isinstance(bert_avg, (int, float))
+        else None
+    )
+    ttl_tok_percent = (
+        round(ttl_tokens_avg, 4)
+        if isinstance(ttl_tokens_avg, (int, float))
+        else None
+    )
+    inp_tok_percent = (
+        round(inp_tokens_avg, 4)
+        if isinstance(inp_tokens_avg, (int, float))
+        else None
+    )
+    out_tok_percent = (
+        round(out_tokens_avg, 4)
+        if isinstance(out_tokens_avg, (int, float))
+        else None
+    )
+    
     calibration_err_percent = (
         round(calibration_error, 2)
         if isinstance(calibration_error, (int, float))
@@ -706,8 +911,18 @@ def main():
     per_query_metrics = []
     for r in all_results:
         qid = r.get("query_id")
+        question = r.get("question")
+        response = r.get("response")
+        final_answer = r.get("judge_result", {}).get("extracted_final_answer", "")
+        correct_answer = r.get("correct_answer")
         correct_flag = bool(r.get("judge_result", {}).get("correct", False))
         recall_val = r.get("retrieval", {}).get("recall", None)
+        f1_score = r.get("F1", 0.0)
+        em_score = r.get("EM", 0.0)
+        bert_score = r.get("BERTScore", 0.0)
+        total_tokens = r.get("total_tokens", 0.0)
+        input_tokens = r.get("input_tokens", 0.0)
+        output_tokens = r.get("output_tokens", 0.0)
         recall_val_percent = (
             round(recall_val * 100.0, 2)
             if isinstance(recall_val, (int, float))
@@ -717,8 +932,18 @@ def main():
         per_query_metrics.append(
             {
                 "query_id": qid,
+                "question": question,
+                "response": response,
+                "final_answer": final_answer,
+                "correct_answer": correct_answer,
                 "correct": correct_flag,
                 "recall": recall_val_percent,
+                'F1': f1_score,
+                "EM": em_score,
+                "BERTScore": bert_score,
+                'total_tokens': total_tokens,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
                 "tool_calls": dict(tool_counts),
             }
         )
@@ -774,10 +999,16 @@ def main():
         "LLM": detected_model_name or "change me when submitting",
         "Accuracy (%)": accuracy_percent,
         "Recall (%)": recall_percent,
+        "F1-Score": f1_percent,
+        "EM": em_percent,
+        "BERT-Score": bert_percent,
+        'Total Tokens': ttl_tok_percent,
+        'Input Tokens': inp_tok_percent,
+        'Output Tokens': out_tok_percent,
         "avg_tool_stats": all_tool_counts,
         "Calibration Error (%)": calibration_err_percent,
-        "Retriever": "change me when submitting",
-        "Link": "change me when submitting",
+        "Retriever": "BM25",
+        # "Link": "change me when submitting",
         "Evaluation Date": datetime.now().date().isoformat(),
         "per_query_metrics": per_query_metrics,
     }
