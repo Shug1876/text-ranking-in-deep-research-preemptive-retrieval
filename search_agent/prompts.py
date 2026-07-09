@@ -196,6 +196,8 @@ def format_query(query: str, query_template: str | None = None, docs=None) -> st
         return QUERY_TEMPLATE.format(Question=query)
     elif query_template == "QUERY_TEMPLATE_NO_GET_DOCUMENT":
         return QUERY_TEMPLATE_NO_GET_DOCUMENT.format(Question=query)
+    elif query_template == "QUERY_TEMPLATE_NO_GET_DOCUMENT_NUGGET":
+        return QUERY_TEMPLATE_NO_GET_DOCUMENT_NUGGET.format(Question=query)
     elif query_template == "QUERY_TEMPLATE_NO_GET_DOCUMENT_NO_CITATION":
         return QUERY_TEMPLATE_NO_GET_DOCUMENT_NO_CITATION.format(Question=query)
     elif query_template == "QUERY_DECOMP_TEMPLATE":
