@@ -149,7 +149,7 @@ Please decompose this query into subqueries:
 {query}
 """
 
-NUGGET_EXTRACT_PROMPT = """You are a helpful nugget retrieval assistant. 
+NUGGET_EXTRACT_PROMPT_1 = """You are a helpful nugget retrieval assistant. 
 Your main task is to identify at most 5 nuggets of information from documents that are directly relevant to helping to answer a given query. 
 Focus on details that could lead to the answer of the query. Carefully examine BOTH the title AND the full body text of each document equally, as critical information can appear anywhere, 
 For every nugget you extract, always consider: how does this piece of information bring us closer to answering the user's query? 
@@ -164,9 +164,19 @@ Please extract nuggets from the following documents in relation to the query bel
 
 {docs}"""
 
+NUGGET_EXTRACT_PROMPT = """Given a query and a list of passages, annotate information nuggets that contain the relevant information to help answering the query. 
+For every nugget you annotate, always consider: how does this piece of information bring us closer to answering the query? 
+If you find there are no relevant nuggets, your response must be an empty list. 
+Your response must be given as a parameter to the 'nuggets' parameter for the 'give_nuggets' function tool.
+
+Please annotate nuggets from the following passages in relation to the query below:
+{query}
+
+{docs}"""
+
 NUGGET_CAN_ANSWER = """You are a helpful assistant that answers a question based on a set of information nuggets. 
 Given a user query and a set of information nuggets, try to answer the query.
-If you cannot answer the query, respond with "I cannot answer the query based on the provided nuggets." 
+If you cannot answer the query, respond with only "Can Answer: no" 
 Your answer should be based solely on the content of the nuggets and the query, without relying on internal knowledge. 
 
 Query: {query}
@@ -203,6 +213,7 @@ def format_query(query: str, query_template: str | None = None, docs=None) -> st
     elif query_template == "QUERY_DECOMP_TEMPLATE":
         examples = get_decomp_examples(n=3)
         return QUERY_DECOMP_TEMPLATE.format(examples=examples, query=query)
+        # return QUERY_DECOMP_TEMPLATE.format(query=query)
     elif query_template == "NUGGET_EXTRACT_PROMPT":
         return NUGGET_EXTRACT_PROMPT.format(query=query, docs=docs)
     elif query_template == "NUGGET_CAN_ANSWER":

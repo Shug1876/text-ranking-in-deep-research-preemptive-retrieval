@@ -6,7 +6,11 @@ data/
 
 scripts_build_index/
 
+indexes/
+
 main.ipynb
+
+main.py
 
 *.log
 
