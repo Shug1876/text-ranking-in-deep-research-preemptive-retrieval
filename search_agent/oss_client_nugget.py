@@ -197,7 +197,7 @@ def nugget_extract(client: openai.OpenAI, query: str, text: str, args):
                         }
                     nuggets = eval(response_dict['output'][i]['arguments'])['nuggets']
                 output.append(response_dict['output'][i])
-            print(response.output_text)
+            # print(response.output_text)
             return nuggets, output, {'total_tokens': total_tokens, 'input_tokens': input_tokens, 'output_tokens': output_tokens}
         except:
             response = None
@@ -313,7 +313,7 @@ def nugget_answer(client, nuggets, query: str, args):
                         'status': None
                     }
                 ans_outputs.append(response_dict['output'][i])
-            print(response.output_text)
+            # print(response.output_text)
             output_text = response.output_text
             extracted_answer = extract_nugget_answer(output_text)
             return output_text, ans_outputs, extracted_answer, {'total_tokens': total_tokens, 'input_tokens': input_tokens, 'output_tokens': output_tokens}
@@ -654,7 +654,7 @@ def _process_tsv_dataset(
 
         query_decomp, decomp_output, decomp_token_info = init_query_decomp(client, qtext, args)
         
-        print("DECOMPED QUERY=====\n"+str(query_decomp)+"\n=====")
+        # print("DECOMPED QUERY=====\n"+str(query_decomp)+"\n=====")
         
         decomp_token_infos['total_tokens'] += decomp_token_info['total_tokens']
         decomp_token_infos['input_tokens'] += decomp_token_info['input_tokens']
@@ -685,16 +685,17 @@ def _process_tsv_dataset(
             decomp_token_infos['input_tokens'] += nug_token_info['input_tokens']
             decomp_token_infos['output_tokens'] += nug_token_info['output_tokens']
             decomp_outputs.extend(nug_output)
-            print("NUGGETS=====\n"+str(nuggets)+"\n=====")
-            all_nuggets.extend(nuggets)
-            nug_answer, ans_output, can_answer, ans_token_info = nugget_answer(client, all_nuggets, qtext, args)
-            decomp_token_infos['total_tokens'] += ans_token_info['total_tokens']
-            decomp_token_infos['input_tokens'] += ans_token_info['input_tokens']
-            decomp_token_infos['output_tokens'] += ans_token_info['output_tokens']
-            decomp_outputs.extend(ans_output)
-            if can_answer:
-                solved = [nug_answer, decomp_outputs, decomp_token_infos]
-                break
+            # print("NUGGETS=====\n"+str(nuggets)+"\n=====")
+            if len(nuggets)>0:
+                all_nuggets.extend(nuggets)
+                nug_answer, ans_output, can_answer, ans_token_info = nugget_answer(client, all_nuggets, qtext, args)
+                decomp_token_infos['total_tokens'] += ans_token_info['total_tokens']
+                decomp_token_infos['input_tokens'] += ans_token_info['input_tokens']
+                decomp_token_infos['output_tokens'] += ans_token_info['output_tokens']
+                decomp_outputs.extend(ans_output)
+                if can_answer:
+                    solved = [nug_answer, decomp_outputs, decomp_token_infos]
+                    break
         
         initial_request = {
             "model": args.model,

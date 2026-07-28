@@ -2,6 +2,7 @@
 BM25 searcher implementation using Pyserini.
 """
 
+import os
 import json
 import logging
 import pyterrier as pt
@@ -9,7 +10,9 @@ import pyterrier as pt
 from pyterrier_pisa import PisaIndex
 from typing import Any, Dict, Optional
 
-# from pyserini.search.lucene import LuceneSearcher
+os.environ['OPENAI_API_KEY'] = str(os.environ['IDA_LLM_API_KEY'])
+
+from pyserini.search.lucene import LuceneSearcher
 
 from .base import BaseSearcher
 
@@ -204,12 +207,16 @@ class BM25Searcher(BaseSearcher):
         logger.info(f"Initializing BM25 searcher with index: {args.index_path}")
 
         try:
-            index_ref = pt.terrier.TerrierIndex(
-                "/mnt/indices/browsecomp-plus-passages.terrier"
-            )
-            index = PisaIndex('/mnt/indices/browsecomp-plus-passages.pisa', text_field=['title', 'text'])
-            p = (index.bm25(k1=args.k1, b=args.b) >> index_ref.text_loader (['title', 'text']))
-            self.searcher = p % args.k
+            self.searcher = LuceneSearcher(args.index_path)
+            self.searcher.set_bm25(k1=args.k1, b=args.b)
+
+        # try:
+        #     index_ref = pt.terrier.TerrierIndex(
+        #         "/mnt/indices/browsecomp-plus-passages.terrier"
+        #     )
+        #     index = PisaIndex('/mnt/indices/browsecomp-plus-passages.pisa', text_field=['title', 'text'])
+        #     p = (index.bm25(k1=args.k1, b=args.b) >> index_ref.text_loader (['title', 'text']))
+        #     self.searcher = p % args.k
             logger.info(f"BM25 parameters set successfully with k1={args.k1} and b={args.b}")
 
             # if args.rm3:
@@ -297,12 +304,17 @@ class BM25Searcher(BaseSearcher):
         #     hits = self.searcher.search(query, self.args.reranking_depth)
         # else:
         #     hits = self.searcher.search(query, k)
-        hits = self.searcher.search(query)#, k)
+        # hits = self.searcher.search(query)#, k)
+        hits = self.searcher.search(query, k)
         retrieved_results = []
-        for _, hit in hits.iterrows():
-            # raw = json.loads(hit.lucene_document.get("raw"))
+        # for _, hit in hits.iterrows():
+        for hit in hits:
+            raw = json.loads(hit.lucene_document.get("raw"))
+            # retrieved_results.append(
+            #     {"docid": hit['docno'], "score": hit['score'], "text": hit["text"]}
+            # )
             retrieved_results.append(
-                {"docid": hit['docno'], "score": hit['score'], "text": hit["text"]}
+                {"docid": hit.docid, "score": hit.score, "text": raw["contents"]}
             )
         return retrieved_results
 

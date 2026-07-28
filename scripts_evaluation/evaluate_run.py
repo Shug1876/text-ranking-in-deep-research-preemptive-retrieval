@@ -482,6 +482,15 @@ def main():
     BASE_URL = "http://api.llm.apps.os.dcs.gla.ac.uk/v1"  # outside UofG network: "http://api.terrier.org/v1"
     API_KEY = os.environ['IDA_LLM_API_KEY']
     client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
+    result = None
+    while result is None:
+        try:
+            result = client.responses.create(
+                model='qwen-3-32b',
+                input="Tell me a funny joke about cats."
+            )
+        except:
+            result = None
     parser = argparse.ArgumentParser(
         description="Evaluate browsecomp responses using Qwen judge model."
     )
