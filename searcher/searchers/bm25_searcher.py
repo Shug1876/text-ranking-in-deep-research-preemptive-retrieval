@@ -219,9 +219,9 @@ class BM25Searcher(BaseSearcher):
         #     self.searcher = p % args.k
             logger.info(f"BM25 parameters set successfully with k1={args.k1} and b={args.b}")
 
-            # if args.rm3:
-            #     self.searcher.set_rm3()
-            #     logger.info("RM3 query expansion initialized successfully")
+            if args.rm3:
+                self.searcher.set_rm3(fb_terms=5, fb_docs=5)
+                logger.info("RM3 query expansion initialized successfully")
 
         except Exception as exc:
             raise ValueError(

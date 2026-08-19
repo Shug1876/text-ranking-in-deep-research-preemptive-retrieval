@@ -12,6 +12,10 @@ main.ipynb
 
 main.py
 
+rm3_main.py
+
+rm3_intermediate_queries/
+
 *.log
 
 *.pyc

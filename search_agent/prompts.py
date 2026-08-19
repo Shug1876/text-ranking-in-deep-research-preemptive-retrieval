@@ -137,7 +137,9 @@ Guidelines:
 2. Subqueries MUST be completely self-contained and answerable independently - do not use pronouns or references like "this person", "the author", "these conditions", "they", "the movie", etc.
 3. Each subquery should include all necessary context and constraints from the original query, but remain concise and clear
 4. Preserve all important details and constraints from the original query
-5. Return only the subqueries as a JSON array of strings i.e. '''["subquery1", "subquery2", ...]''', without any additional text or explanation.
+
+Your response must be given as a parameter to the 'subqueries' parameter for the 'decomp_query' function tool.
+
 Example:
 Original: "Please identify the fictional character who occasionally breaks the fourth wall with the audience, has a backstory involving help from selfless ascetics, is known for his huMor, and had a TV show that aired between the 1960s and 1980s with fewer than 50 episodes."
 Subqueries: [ "Which fictional characters occasionally break the fourth wall with the audience?", "Which fictional characters have a backstory involving help from selfless ascetics?", "Which fictional characters are known for their humor?", "Which TV shows aired between the 1960s and 1980s?", "Which TV shows had fewer than 50 episodes? ]
@@ -149,45 +151,33 @@ Please decompose this query into subqueries:
 {query}
 """
 
-NUGGET_EXTRACT_PROMPT_1 = """You are a helpful nugget retrieval assistant. 
-Your main task is to identify at most 5 nuggets of information from documents that are directly relevant to helping to answer a given query. 
-Focus on details that could lead to the answer of the query. Carefully examine BOTH the title AND the full body text of each document equally, as critical information can appear anywhere, 
-For every nugget you extract, always consider: how does this piece of information bring us closer to answering the user's query? 
-Ensure that each nugget is short (1-12 words), self-contained, and directly tied to the query. 
-Only extract details that serve as meaningful stepping stones toward resolving the query — whether they directly answer it, narrow down the search, or establish a key connection. 
-Do not rely on your internal knowledge, rely only on the content provided by the user and nothing else. 
-If you find there are no relevant nuggets, your response must be an empty list. 
-Your response must be given as a parameter to the 'nuggets' parameter for the 'give_nuggets' function tool.
+NUGGET_UPDATE_AND_CHECK_PROMPT = """You are a precise information extraction assistant helping to answer a complex query by maintaining a curated list of information units.
+Given a query, a list of search passages, and a list of information units gathered so far (may be empty), you have two specific tasks:
 
-Please extract nuggets from the following documents in relation to the query below:
-{query}
+1. Review the new passages in relation to the query and update the existing list of information units.
+- ADD new units if the passages contain relevant information that brings us closer to answering the query.
+- REMOVE units from the existing list that are now irrelevant, redundant, or superseded by better information.
+- AMEND units that can be made more precise or complete given the new passages.
+- For every unit you keep or add, ask yourself: does this bring us closer to answering the query?
+- If no changes are needed, return the original list unchanged.
 
-{docs}"""
+2. Once the list is updated, assess whether the information units are collectively sufficient to fully and confidently answer the original query.
+- Base your answer solely on the content of the information units — do not rely on internal knowledge.
+- If yes, provide a succinct, exact answer derived directly from the units.
+- If no, leave the answer field empty.
 
-NUGGET_EXTRACT_PROMPT = """Given a query and a list of passages, annotate information nuggets that contain the relevant information to help answering the query. 
-For every nugget you annotate, always consider: how does this piece of information bring us closer to answering the query? 
-If you find there are no relevant nuggets, your response must be an empty list. 
-Your response must be given as a parameter to the 'nuggets' parameter for the 'give_nuggets' function tool.
-
-Please annotate nuggets from the following passages in relation to the query below:
-{query}
-
-{docs}"""
-
-NUGGET_CAN_ANSWER = """You are a helpful assistant that answers a question based on a set of information nuggets. 
-Given a user query and a set of information nuggets, try to answer the query.
-If you cannot answer the query, respond with only "Can Answer: no" 
-Your answer should be based solely on the content of the nuggets and the query, without relying on internal knowledge. 
+Your response must be provided as parameters to the 'update_nuggets_and_check' function tool:
+- 'units': the updated, deduplicated list of information units
+- 'can_answer': 'yes' or 'no'
+- 'answer': your succinct, exact, final answer if can_answer is 'yes', otherwise an empty string
+- 'explanation': your explanation for your final answer if can_answer is 'yes', otherwise an empty string
 
 Query: {query}
-Nuggets: {nuggets}
 
-Your response should be in the following format:
-Can Answer: {{yes or no}}
-Explanation: {{your explanation for your final answer}}
-Exact Answer: {{your succinct, final answer}}
-Confidence: {{your confidence score between 0% and 100% for your answer}}
-"""
+New Search Passages:
+{docs}
+
+Current Information Units (empty list means none gathered yet): {units}"""
 
 
 def get_decomp_examples(n=3): # -> List[Dict]
@@ -198,7 +188,7 @@ def get_decomp_examples(n=3): # -> List[Dict]
     return df.to_dict(orient='records')
 
 
-def format_query(query: str, query_template: str | None = None, docs=None) -> str:
+def format_query(query: str, query_template: str | None = None, add_info=None) -> str:
     """Format the query with the specified template if provided."""
     if query_template is None:
         return query
@@ -213,10 +203,17 @@ def format_query(query: str, query_template: str | None = None, docs=None) -> st
     elif query_template == "QUERY_DECOMP_TEMPLATE":
         examples = get_decomp_examples(n=3)
         return QUERY_DECOMP_TEMPLATE.format(examples=examples, query=query)
-        # return QUERY_DECOMP_TEMPLATE.format(query=query)
-    elif query_template == "NUGGET_EXTRACT_PROMPT":
-        return NUGGET_EXTRACT_PROMPT.format(query=query, docs=docs)
-    elif query_template == "NUGGET_CAN_ANSWER":
-        return NUGGET_CAN_ANSWER.format(query=query, nuggets=docs)
+    elif query_template=="NUGGET_UPDATE_AND_CHECK_PROMPT":
+        import json
+        prompt = NUGGET_UPDATE_AND_CHECK_PROMPT.format(
+            query=query,
+            docs=add_info['docs'],
+            units=json.dumps(add_info['current_units'], indent=2) if add_info['current_units'] else "[]",
+        )
+        return prompt
+    # elif query_template == "NUGGET_EXTRACT_PROMPT":
+    #     return NUGGET_EXTRACT_PROMPT.format(query=query, docs=add_info, units=units)
+    # elif query_template == "NUGGET_CAN_ANSWER":
+    #     return NUGGET_CAN_ANSWER.format(query=query, units=add_info)
     else:
         raise ValueError(f"Unknown query template: {query_template}")

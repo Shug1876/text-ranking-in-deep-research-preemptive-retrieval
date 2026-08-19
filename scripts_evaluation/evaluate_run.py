@@ -76,6 +76,38 @@ def create_judge_prompt(question: str, response: str, correct_answer: str) -> st
         question=question, response=response, correct_answer=correct_answer
     )
 
+def extract_answer_from_response(response: str):
+    result = {
+        "extracted_final_answer": None,
+        "reasoning": None,
+        "correct": False,
+        "confidence": None,
+        "parse_error": False,
+    }
+    if not response:
+        result["parse_error"] = True
+        return result
+    # Extract extracted_final_answer (try bold formats first, then regular)
+    answer_match = re.search(
+        r"\*\*exact answer:\*\*\s*(.*?)(?=\n|$)",
+        response,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not answer_match:
+        answer_match = re.search(
+            r"\*\*exact answer\*\*:\s*(.*?)(?=\n|$)",
+            response,
+            re.IGNORECASE | re.DOTALL,
+        )
+    if not answer_match:
+        answer_match = re.search(
+            r"exact answer:\s*(.*?)(?=\n|$)",
+            response,
+            re.IGNORECASE | re.DOTALL,
+        )
+    if answer_match:
+        result["extracted_final_answer"] = answer_match.group(1).strip()
+    return result
 
 def parse_judge_response(judge_response: str) -> dict:
     result = {
@@ -401,23 +433,25 @@ def save_detailed_csv(all_results: List[dict], output_dir: Path):
 
 def evaluate_item(item, qrel_evidence, df_answers, client, args, eval_lock):
     judge_text = ""
-    try:
-        judge_text = client.chat.completions.create(
-            model=args.model,
-            messages=[{"role": "user", "content": item["judge_prompt"]}],
-            temperature=args.temperature,
-            top_p=args.top_p,
-            max_tokens=args.max_output_tokens,
-            extra_body={
-                "top_k": args.top_k,
-                "enable_thinking": False,
-            },
-        ).choices[0].message.content or ""
-    except Exception as e:
-        print(f"Error calling judge for query_id {item['query_id']}: {e}")
-        judge_text = ""
-
-    judge_result = parse_judge_response(judge_text)
+    if not args.no_judge:
+        try:
+            judge_text = client.chat.completions.create(
+                model=args.model,
+                messages=[{"role": "user", "content": item["judge_prompt"]}],
+                temperature=args.temperature,
+                top_p=args.top_p,
+                max_tokens=args.max_output_tokens,
+                extra_body={
+                    "top_k": args.top_k,
+                    "enable_thinking": False,
+                },
+            ).choices[0].message.content or ""
+        except Exception as e:
+            print(f"Error calling judge for query_id {item['query_id']}: {e}")
+            judge_text = ""
+        judge_result = parse_judge_response(judge_text)
+    else:
+        judge_result = extract_answer_from_response(item["response"])
     cited_docids = extract_citations_from_response(item["response"])
     citation_metrics_positives = compute_citation_metrics(
         cited_docids, qrel_evidence.get(str(item["query_id"]), [])
@@ -482,20 +516,17 @@ def main():
     BASE_URL = "http://api.llm.apps.os.dcs.gla.ac.uk/v1"  # outside UofG network: "http://api.terrier.org/v1"
     API_KEY = os.environ['IDA_LLM_API_KEY']
     client = OpenAI(base_url=BASE_URL, api_key=API_KEY)
-    result = None
-    while result is None:
-        try:
-            result = client.responses.create(
-                model='qwen-3-32b',
-                input="Tell me a funny joke about cats."
-            )
-        except:
-            result = None
     parser = argparse.ArgumentParser(
         description="Evaluate browsecomp responses using Qwen judge model."
     )
     parser.add_argument(
         "--input_dir", required=True, help="Directory containing run JSON files"
+    )
+    parser.add_argument(
+        "--no_judge",
+        action="store_true",
+        default=False,
+        help="Skip LLM judge and compute F1/EM/BERTScore directly from the raw response",
     )
     parser.add_argument(
         "--ground_truth",
@@ -547,6 +578,16 @@ def main():
         help="Number of threads",
     )
     args = parser.parse_args()
+    if not args.no_judge:
+        result = None
+        while result is None:
+            try:
+                result = client.responses.create(
+                    model='qwen-3-32b',
+                    input="Tell me a funny joke about cats."
+                )
+            except:
+                result = None
 
     input_dir = Path(args.input_dir)
     eval_dir = Path(args.eval_dir)

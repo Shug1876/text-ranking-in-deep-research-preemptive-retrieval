@@ -135,30 +135,151 @@ class SearchToolHandler:
         if result is None:
             return json.dumps({"error": f"Document with docid '{docid}' not found"})
         return json.dumps(result, indent=2)
-    
-def nugget_extract(client: openai.OpenAI, query: str, text: str, args):
+
+nugget_answer_format = """Explanation:  \n{explanation}\n\nExact Answer: {answer}  \nConfidence: {confidence}%"""
+
+def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str, current_nuggets, args):
+    """
+    Single LLM call that:
+      1. Updates the nugget list given new search results (add/remove/amend)
+      2. Checks whether the updated nuggets are sufficient to answer the query
+      3. Returns the answer if sufficient, else None
+    Replaces the separate nugget_extract + nugget_answer calls.
+    """
     tools = [
         {
             "type": "function",
-            "name": "nugget_extract",
-            "description": "Formats the extracted nuggets.",
+            "name": "update_nuggets_and_check",
+            "description": (
+                "Update the list of information units given new evidence, "
+                "then determine whether they collectively answer the original query."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "nuggets": {
+                    "units": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "An array of identified nuggets of information.",
+                        "description": (
+                            "The revised, deduplicated list of information units relevant "
+                            "to the original query. Add new units from the search results, "
+                            "remove units that are irrelevant or superseded, and amend units "
+                            "that can be made more precise."
+                        ),
+                    },
+                    "can_answer": {
+                        "type": "string",
+                        "enum": ["yes", "no"],
+                        "description": (
+                            "Whether the current units list is sufficient to fully answer "
+                            "the original query."
+                        ),
+                    },
+                    "answer": {
+                        "type": "string",
+                        "description": (
+                            "The exact answer to the original query derived from the units. "
+                            "Only populate this field if can_answer is 'yes', otherwise leave empty."
+                        ),
+                    },
+                    "explanation": {
+                        "type": "string",
+                        "description": (
+                            "Your explanation for your final answer. "
+                            "Only populate this field if can_answer is 'yes', otherwise leave empty."
+                        ),
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": (
+                            "Your confidence in your final answer, must be an integer value between 0 and 100. "
+                            "Only populate this field if can_answer is 'yes', otherwise leave empty."
+                        ),
                     },
                 },
-                "required": ["nuggets"],
+                "required": ["units", "can_answer", "answer", "explanation", "confidence"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    ]
+    prompt = format_query(
+        query,
+        "NUGGET_UPDATE_AND_CHECK_PROMPT",
+        add_info={'docs': search_text, 'current_units': current_nuggets}
+    )
+    request = {
+        "model": args.model,
+        "max_output_tokens": args.max_tokens,
+        "input": [
+            {"role": "user", "content": prompt}
+        ],
+        'tools': tools,
+        "truncation": "auto",
+        "reasoning": {"effort": 'medium', "summary": "detailed"},
+    }
+    response = None
+    while response is None:
+        try:
+            response = client.responses.create(**request)
+        except:
+            response = None
+    usage = response.usage
+    token_info = {
+        "total_tokens": usage.total_tokens,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+    }
+    response_dict = response.model_dump(mode="python")
+    output_items = []
+    updated_nuggets = current_nuggets
+    answer_output = None
+    for i in range(len(response_dict['output'])):
+        if response_dict['output'][i]['type'] == 'mcp_call' or response_dict['output'][i]['type'] == 'function_call':
+            if response_dict['output'][i]['type'] == 'mcp_call':
+                response_dict['output'][i] = {
+                    'id': response_dict['output'][i]['id'],
+                    'call_id': response_dict['output'][i]['id'],  # function_call uses call_id
+                    'arguments': response_dict['output'][i]['arguments'],
+                    'name': response_dict['output'][i]['name'],
+                    'type': 'function_call',
+                    'status': None
+                }
+            parsed_args = json.loads(response_dict['output'][i]['arguments'])
+            updated_nuggets = parsed_args.get("units", current_nuggets)
+            if parsed_args.get("can_answer")=="yes":
+                answer = parsed_args.get("answer") or None
+                explanation = parsed_args.get("explanation") or None
+                confidence = parsed_args.get("confidence") or None
+                if answer and explanation and confidence:
+                    answer_output = nugget_answer_format.format(answer=answer, explanation=explanation, confidence=confidence)
+        output_items.append(response_dict['output'][i])
+    return updated_nuggets, answer_output, output_items, token_info
+
+
+def nugget_extract(client: openai.OpenAI, query: str, text: str, units, args):
+    tools = [
+        {
+            "type": "function",
+            "name": "unit_extract",
+            "description": "Formats the extracted units.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "units": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "An updated array of identified units of information.",
+                    },
+                },
+                "required": ["units"],
             },
         },
     ]
     total_tokens = 0
     input_tokens = 0
     output_tokens = 0
-    prompt = format_query(query, "NUGGET_EXTRACT_PROMPT", docs=text)
+    prompt = format_query(query, "NUGGET_EXTRACT_PROMPT", add_info=text)
     initial_request = {
         "model": args.model,
         "max_output_tokens": args.max_tokens,
@@ -172,6 +293,8 @@ def nugget_extract(client: openai.OpenAI, query: str, text: str, args):
     output = []
     response = None
     nuggets = []
+    # print("Query:", query)
+    # print("Original Units:", units)
     while response is None:
         try:
             response = client.responses.create(
@@ -195,16 +318,33 @@ def nugget_extract(client: openai.OpenAI, query: str, text: str, args):
                             'type': 'function_call',
                             'status': None
                         }
-                    nuggets = eval(response_dict['output'][i]['arguments'])['nuggets']
+                    nuggets = json.loads(response_dict['output'][i]['arguments'])['units']
                 output.append(response_dict['output'][i])
-            # print(response.output_text)
+            # print("Updated Units List:", nuggets)
             return nuggets, output, {'total_tokens': total_tokens, 'input_tokens': input_tokens, 'output_tokens': output_tokens}
         except:
             response = None
-    
-    return text
 
+# TODO: make it so it connects to the decomp_query function tool
 def init_query_decomp(client: openai.OpenAI, query: str, args):
+    tools = [
+        {
+            "type": "function",
+            "name": "decomp_query",
+            "description": "Formats the extracted subqueries.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subqueries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "An array of identified subqueries.",
+                    },
+                },
+                "required": ["units"],
+            },
+        },
+    ]
     total_tokens = 0
     input_tokens = 0
     output_tokens = 0
@@ -216,6 +356,7 @@ def init_query_decomp(client: openai.OpenAI, query: str, args):
         "input": [
             {"role": "user", "content": prompt}
         ],
+        "tools": tools,
         "truncation": "auto",
         "reasoning": {"effort": 'medium', "summary": "detailed"},
     }
@@ -230,6 +371,7 @@ def init_query_decomp(client: openai.OpenAI, query: str, args):
             input_tokens += usage.input_tokens
             output_tokens += usage.output_tokens
             response_dict = response.model_dump(mode="python")
+            decomp = []
             for i in range(len(response_dict['output'])):
                 if response_dict['output'][i]['type'] == 'mcp_call':
                     # TODO: upstream vLLM bug outputs mcp_call but only accepts function_call as input
@@ -242,84 +384,14 @@ def init_query_decomp(client: openai.OpenAI, query: str, args):
                         'type': 'function_call',
                         'status': None
                     }
+                if 'arguments' in response_dict['output'][i]:
+                    decomp = json.loads(response_dict['output'][i]['arguments'])['subqueries']
                 decomp_outputs.append(response_dict['output'][i])
-            output_text = response.output_text
-            if output_text.startswith("```") and output_text.endswith("```"):
-                output_text = output_text.removeprefix("```\n").removesuffix("\n```")
-                if output_text.startswith("json\n"):
-                    output_text = output_text.removeprefix("json\n")
-            final_output_text = ""
-            try:
-                final_output_text = json.loads(output_text)
-                if not final_output_text:
-                    final_output_text = eval(output_text)
-            except:
-                final_output_text = eval(output_text)
-            return final_output_text, decomp_outputs, {'total_tokens': total_tokens, 'input_tokens': input_tokens, 'output_tokens': output_tokens}
-        except:
+            return decomp, decomp_outputs, {'total_tokens': total_tokens, 'input_tokens': input_tokens, 'output_tokens': output_tokens}
+        except Exception as e:
+            # print(f"[ERROR ENCOUNTERED]\t{type(e).__name__} {e}")
             response = None
 
-def extract_nugget_answer(output_text: str):
-    import re
-    can_answer_match = re.search(
-        r"\*\*Can Answer:\*\*\s*(yes|no)", output_text, re.IGNORECASE
-    )
-    if not can_answer_match:
-        can_answer_match = re.search(
-            r"\*\*Can Answer\*\*:\s*(yes|no)", output_text, re.IGNORECASE
-        )
-    if not can_answer_match:
-        can_answer_match = re.search(
-            r"Can Answer:\s*(yes|no)", output_text, re.IGNORECASE
-        )
-    return can_answer_match.group(1).lower()=="yes" if can_answer_match else False
-
-def nugget_answer(client, nuggets, query: str, args):
-    total_tokens = 0
-    input_tokens = 0
-    output_tokens = 0
-    prompt = format_query(query, "NUGGET_CAN_ANSWER", docs=nuggets)
-    request = {
-        "model": args.model,
-        "max_output_tokens": args.max_tokens,
-        "input": [
-            {"role": "user", "content": prompt}
-        ],
-        "truncation": "auto",
-        "reasoning": {"effort": 'medium', "summary": "detailed"},
-    }
-    response = None
-    ans_outputs = []
-    while response is None:
-        try:
-            response = client.responses.create(
-                **request,
-            )
-            usage = response.usage
-            total_tokens += usage.total_tokens
-            input_tokens += usage.input_tokens
-            output_tokens += usage.output_tokens
-            response_dict = response.model_dump(mode="python")
-            for i in range(len(response_dict['output'])):
-                if response_dict['output'][i]['type'] == 'mcp_call':
-                    # TODO: upstream vLLM bug outputs mcp_call but only accepts function_call as input
-                    # Convert mcp_call to function_call format
-                    response_dict['output'][i] = {
-                        'id': response_dict['output'][i]['id'],
-                        'call_id': response_dict['output'][i]['id'],  # function_call uses call_id
-                        'arguments': response_dict['output'][i]['arguments'],
-                        'name': response_dict['output'][i]['name'],
-                        'type': 'function_call',
-                        'status': None
-                    }
-                ans_outputs.append(response_dict['output'][i])
-            # print(response.output_text)
-            output_text = response.output_text
-            extracted_answer = extract_nugget_answer(output_text)
-            return output_text, ans_outputs, extracted_answer, {'total_tokens': total_tokens, 'input_tokens': input_tokens, 'output_tokens': output_tokens}
-        except:
-            response = None
-    return nuggets
 
 def run_conversation_with_tools(
     client: openai.OpenAI,
@@ -346,15 +418,6 @@ def run_conversation_with_tools(
 
     while iteration <= max_iterations:
         try:
-            if iteration>1 and len(nuggets)>0:
-                nug_answer, ans_output, can_answer, ans_token_info = nugget_answer(client, nuggets, qtext, args)
-                total_tokens += ans_token_info['total_tokens']
-                input_tokens += ans_token_info['input_tokens']
-                output_tokens += ans_token_info['output_tokens']
-                copy_messages.extend(ans_output)
-                if can_answer:
-                    return copy_messages, tool_usage, "completed", {'total_tokens': total_tokens, 'input_tokens': input_tokens, 'output_tokens': output_tokens}
-
             request = initial_request.copy()
             request["input"] = messages
             response = client.responses.create(
@@ -430,18 +493,12 @@ def run_conversation_with_tools(
                 arguments = json.loads(tool_call["arguments"])
                 result = tool_handler.execute_tool(tool_call["name"], arguments)
                 tool_usage[tool_call["name"]] = tool_usage.get(tool_call["name"], 0) + 1
-
-                copy_messages.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": tool_call["call_id"],
-                        "output": result,
-                    }
-                )
                 
                 if tool_call["name"]=="search":
-                    new_nuggets, nug_output, nug_token_info = nugget_extract(client, qtext, result, args)
-                    nuggets.extend(new_nuggets)
+                    # print("Query Text @ Line461:", qtext)
+                    updated_nuggets, early_answer, nug_output, nug_token_info = nugget_update_and_check(client, qtext, result, nuggets, args)
+                    # new_nuggets, nug_output, nug_token_info = nugget_extract(client, qtext, result, nuggets, args)
+                    nuggets = updated_nuggets
                     copy_messages.extend(nug_output)
                     total_tokens += nug_token_info['total_tokens']
                     input_tokens += nug_token_info['input_tokens']
@@ -457,8 +514,31 @@ def run_conversation_with_tools(
                             "output": json.dumps(new_output, indent=2),
                         }
                     )
+                    copy_messages.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": tool_call["call_id"],
+                            "output": json.dumps(new_output, indent=2),
+                        }
+                    )
+                    if early_answer:
+                        copy_messages.append(
+                            {
+                                "type": "message",
+                                "content": [{'type': 'output_text', 'text':early_answer}]
+                            }
+                        )
+                        return copy_messages, tool_usage, "completed", {'total_tokens': total_tokens, 'input_tokens': input_tokens, 'output_tokens': output_tokens}
+
                 else:
                     new_messages.append(
+                        {
+                            "type": "function_call_output",
+                            "call_id": tool_call["call_id"],
+                            "output": result,
+                        }
+                    )
+                    copy_messages.append(
                         {
                             "type": "function_call_output",
                             "call_id": tool_call["call_id"],
@@ -651,7 +731,6 @@ def _process_tsv_dataset(
 
         decomp_outputs = []
         decomp_token_infos = {'total_tokens': 0, 'input_tokens': 0, 'output_tokens': 0}
-
         query_decomp, decomp_output, decomp_token_info = init_query_decomp(client, qtext, args)
         
         # print("DECOMPED QUERY=====\n"+str(query_decomp)+"\n=====")
@@ -661,6 +740,7 @@ def _process_tsv_dataset(
         decomp_token_infos['output_tokens'] += decomp_token_info['output_tokens']
         decomp_outputs.extend(decomp_output)
         all_nuggets = []
+        # print(query_decomp)
         for idx, sub_q in enumerate(query_decomp):
             sub_results = tool_handler._search(sub_q)
             decomp_outputs.append({
@@ -680,22 +760,20 @@ def _process_tsv_dataset(
                 'type': 'function_call_output',
                 'status': None
             })
-            nuggets, nug_output, nug_token_info = nugget_extract(client, sub_q, sub_results, args)
+            # print("Query Text @ Line702:", sub_q)
+            nuggets, early_answer, nug_output, nug_token_info = nugget_update_and_check(client, qtext, sub_results, all_nuggets, args)
             decomp_token_infos['total_tokens'] += nug_token_info['total_tokens']
             decomp_token_infos['input_tokens'] += nug_token_info['input_tokens']
             decomp_token_infos['output_tokens'] += nug_token_info['output_tokens']
             decomp_outputs.extend(nug_output)
-            # print("NUGGETS=====\n"+str(nuggets)+"\n=====")
-            if len(nuggets)>0:
-                all_nuggets.extend(nuggets)
-                nug_answer, ans_output, can_answer, ans_token_info = nugget_answer(client, all_nuggets, qtext, args)
-                decomp_token_infos['total_tokens'] += ans_token_info['total_tokens']
-                decomp_token_infos['input_tokens'] += ans_token_info['input_tokens']
-                decomp_token_infos['output_tokens'] += ans_token_info['output_tokens']
-                decomp_outputs.extend(ans_output)
-                if can_answer:
-                    solved = [nug_answer, decomp_outputs, decomp_token_infos]
-                    break
+            all_nuggets = nuggets
+            if early_answer:
+                decomp_outputs.append({
+                    "type": "message",
+                    "content": [{'type': 'output_text', 'text':early_answer}]
+                })
+                solved = True
+                break
         
         initial_request = {
             "model": args.model,

@@ -21,7 +21,7 @@ MODEL_NAME=${MODEL##*/}
 K1=0.9
 B=0.4
 
-NUM_THREADS=1
+NUM_THREADS=100
 EVAL_NUM_THREADS=5
 REASONING_EFFORT=medium
 K=5
@@ -116,7 +116,8 @@ python scripts_evaluation/evaluate_run.py \
   --ground_truth ./data/browsecomp_plus_decrypted.jsonl \
   --qrel_evidence ./topics-qrels/qrel_evidence.txt \
   --tensor_parallel_size 2 \
-  --num-threads ${EVAL_NUM_THREADS}
+  --num-threads ${EVAL_NUM_THREADS} \
+  --no_judge
 
 python scripts_evaluation/count_complete.py \
   --input_dir ${OUT_DOC_DIR}
