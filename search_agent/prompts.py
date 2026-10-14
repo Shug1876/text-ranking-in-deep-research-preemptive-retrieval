@@ -208,20 +208,22 @@ NUGGET_DELTA_UPDATE_AND_CHECK_PROMPT = """You are a precise information extracti
 Given a query, a list of search passages, and a numbered list of information units gathered so far (may be empty), you have two specific tasks:
 
 1. Review the new passages in relation to the query and report ONLY the changes to the existing list of information units. Do not repeat units that are unchanged.
-- 'add': new units from the passages that bring us closer to answering the query.
-- 'remove': indices of existing units that are now irrelevant, redundant, or superseded by better information.
-- 'amend': index and replacement text for existing units that the new passages materially refine or correct.
-- For every unit you add or amend, ask yourself: does this bring us closer to answering the query?
-- If no changes are needed, return empty lists for 'add', 'remove' and 'amend'.
+- 'add': new units from the passages that bring us closer to answering the query. Add at most {max_adds} units.
+- Each added unit must be a single fact of at most 25 words, ending with the docid of its source passage in square brackets, e.g. "Jane Doe was born in 1994 [12345_0]".
+- 'remove': indices of existing units that are now irrelevant or redundant.
+- To correct an existing unit, remove it and add the corrected version.
+- If no changes are needed, return empty lists for 'add' and 'remove'.
 
 2. Once the changes are applied, assess whether the information units are collectively sufficient to fully and confidently answer the original query.
 - Base your answer solely on the content of the information units — do not rely on internal knowledge.
-- If yes, provide a succinct, exact answer derived directly from the units.
-- If no, leave the answer field empty.
+- If yes, provide a succinct, exact answer derived directly from the units, and list in 'supporting_units' the indices of the units that contain the answer and its supporting evidence.
+- Existing units keep their [index] numbers; units you add are numbered in order starting from [{next_index}].
+- If no, leave the answer, confidence and supporting_units fields empty.
 
 Your response must be provided as parameters to the 'update_nuggets_and_check' function tool:
-- 'add', 'remove', 'amend': the changes to the list of information units
-- 'answer': your succinct, exact, final answer if you decide you can answer the query, otherwise an empty string
+- 'add', 'remove': the changes to the list of information units
+- 'can_answer': whether the units are sufficient to answer the query
+- 'answer', 'confidence', 'supporting_units': only if you decide you can answer the query
 
 Query: {query}
 
@@ -269,6 +271,8 @@ def format_query(query: str, query_template: str | None = None, add_info=None) -
             query=query,
             docs=add_info['docs'],
             units=units,
+            max_adds=add_info['max_adds'],
+            next_index=len(add_info['current_units'] or []),
         )
     elif query_template=="NUGGET_UPDATE_AND_CHECK_PROMPT_EXPLAIN":
             import json
