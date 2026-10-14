@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -139,27 +140,77 @@ class SearchToolHandler:
 
 nugget_answer_format = """Exact Answer: {answer}  \nConfidence: {confidence}%"""
 
-def apply_nugget_changes(current_nuggets, changes):
-    """Apply add/remove/amend changes (indices refer to current_nuggets) and return a new list."""
-    nuggets = list(current_nuggets or [])
-    for edit in changes.get("amend") or []:
-        idx = edit.get("index")
-        if isinstance(idx, int) and 0 <= idx < len(nuggets) and edit.get("text"):
-            nuggets[idx] = edit["text"]
-    remove = {i for i in changes.get("remove") or [] if isinstance(i, int)}
-    nuggets = [n for i, n in enumerate(nuggets) if i not in remove]
-    for unit in changes.get("add") or []:
-        if unit and unit not in nuggets:
-            nuggets.append(unit)
-    return nuggets
+def new_phase_tokens():
+    return {
+        phase: {"total_tokens": 0, "input_tokens": 0, "output_tokens": 0, "calls": 0}
+        for phase in ("decomp", "nugget", "main")
+    }
 
-def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str, current_nuggets, args):
+def add_phase_tokens(phase_tokens, phase, token_info):
+    """Accumulate one LLM call's usage under the given phase (decomp / nugget / main)."""
+    if phase_tokens is None:
+        return
+    for key in ("total_tokens", "input_tokens", "output_tokens"):
+        phase_tokens[phase][key] += token_info[key]
+    phase_tokens[phase]["calls"] += 1
+
+def apply_nugget_changes(current_nuggets, changes, max_adds, max_nuggets):
+    """
+    Apply add/remove changes (remove indices refer to current_nuggets) and return
+    (updated_nuggets, indexed_units). indexed_units is current_nuggets followed by every
+    unit the model added, matching the numbering the model uses for supporting_units.
+    """
+    nuggets = list(current_nuggets or [])
+    raw_adds = [u if isinstance(u, str) else "" for u in changes.get("add") or []]
+    indexed_units = nuggets + raw_adds
+    remove = {i for i in changes.get("remove") or [] if isinstance(i, int)}
+    updated = [n for i, n in enumerate(nuggets) if i not in remove]
+    for unit in raw_adds[:max_adds]:
+        if unit and unit not in updated:
+            updated.append(unit)
+    if len(updated) > max_nuggets:
+        # Drop the oldest plain facts first so partially verified candidates survive.
+        overflow = len(updated) - max_nuggets
+        drop = set()
+        for i, unit in enumerate(updated):
+            if len(drop) == overflow:
+                break
+            if not is_candidate_unit(unit):
+                drop.add(i)
+        updated = [n for i, n in enumerate(updated) if i not in drop]
+        updated = updated[-max_nuggets:]
+    return updated, indexed_units
+
+def is_candidate_unit(unit):
+    return unit.lstrip().lower().startswith("candidate")
+
+_ANSWER_STOPWORDS = {"the", "a", "an", "of", "and"}
+
+def _answer_tokens(text):
+    return [t for t in re.findall(r"\w+", text.lower()) if t not in _ANSWER_STOPWORDS]
+
+def answer_supported(answer, supporting_units, indexed_units):
+    """True if every content token of the answer appears in the cited supporting units."""
+    cited = [
+        indexed_units[i] for i in supporting_units or []
+        if isinstance(i, int) and 0 <= i < len(indexed_units)
+    ]
+    answer_tokens = _answer_tokens(answer)
+    if not cited or not answer_tokens:
+        return False
+    cited_tokens = set(_answer_tokens(" ".join(cited)))
+    return all(t in cited_tokens for t in answer_tokens)
+
+def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str, current_nuggets, args, phase_tokens=None):
     """
     Single LLM call that:
-      1. Updates the nugget list given new search results (add/remove/amend)
+      1. Updates the nugget list given new search results (add/remove)
       2. Checks whether the updated nuggets are sufficient to answer the query
-      3. Returns the answer if sufficient, else None
-    Replaces the separate nugget_extract + nugget_answer calls.
+      3. Returns the answer if sufficient and grounded in the cited supporting units, else None
+
+    Returns (updated_nuggets, answer_output, candidate, check, output_items, token_info).
+    candidate is an answer the model proposed that failed the supporting_units check; it is
+    handed to the main agent as an unverified hypothesis rather than returned as final.
     """
     tools = [
         {
@@ -176,31 +227,18 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "New information units from the search results relevant to the "
-                            "original query. Do not repeat existing units."
+                            f"At most {args.max_nugget_adds} new information units from the search results "
+                            "relevant to the original query. Each is one fact of at most 25 words ending "
+                            "with its source docid in square brackets, or a candidate unit of at most 40 words "
+                            "('Candidate <exact name> [docid]: satisfies ...; contradicts ...; unverified ...'). "
+                            "Copy names, numbers and dates exactly. Do not repeat existing units."
                         ),
                     },
                     "remove": {
                         "type": "array",
                         "items": {"type": "integer"},
                         "description": (
-                            "Indices of existing units that are irrelevant, redundant, or superseded."
-                        ),
-                    },
-                    "amend": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "index": {"type": "integer"},
-                                "text": {"type": "string"},
-                            },
-                            "required": ["index", "text"],
-                            "additionalProperties": False,
-                        },
-                        "description": (
-                            "Replacement text for existing units, by index. Only amend when the "
-                            "new evidence materially refines or corrects a unit."
+                            "Indices of existing units that are duplicated, or candidates contradicted by the passages."
                         ),
                     },
                     "can_answer": {
@@ -225,8 +263,17 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
                             "Only populate this field if can_answer is 'yes'."
                         ),
                     },
+                    "supporting_units": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": (
+                            "Indices of the units that contain the answer and its supporting evidence. "
+                            "Existing units keep their indices; added units continue the numbering. "
+                            "Only populate this field if can_answer is 'yes'."
+                        ),
+                    },
                 },
-                "required": ["add", "remove", "amend", "can_answer"],
+                "required": ["add", "remove", "can_answer"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -235,7 +282,7 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
     prompt = format_query(
         query,
         "NUGGET_DELTA_UPDATE_AND_CHECK_PROMPT",
-        add_info={'docs': search_text, 'current_units': current_nuggets}
+        add_info={'docs': search_text, 'current_units': current_nuggets, 'max_adds': args.max_nugget_adds}
     )
     request = {
         "model": args.model,
@@ -259,10 +306,13 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
     }
+    add_phase_tokens(phase_tokens, "nugget", token_info)
     response_dict = response.model_dump(mode="python")
     output_items = []
     updated_nuggets = current_nuggets
     answer_output = None
+    candidate = None
+    check = None
     for i in range(len(response_dict['output'])):
         if response_dict['output'][i]['type'] == 'mcp_call' or response_dict['output'][i]['type'] == 'function_call':
             if response_dict['output'][i]['type'] == 'mcp_call':
@@ -275,17 +325,30 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
                     'status': None
                 }
             parsed_args = json.loads(response_dict['output'][i]['arguments'])
-            updated_nuggets = apply_nugget_changes(current_nuggets, parsed_args)
+            updated_nuggets, indexed_units = apply_nugget_changes(
+                current_nuggets, parsed_args, args.max_nugget_adds, args.max_nuggets
+            )
             if parsed_args.get("can_answer")=="yes":
                 answer = parsed_args.get("answer") or None
-                confidence = parsed_args.get("confidence") or None
-                if answer and confidence:
-                    answer_output = nugget_answer_format.format(answer=answer, confidence=confidence)
+                confidence = parsed_args.get("confidence")
+                supporting_units = parsed_args.get("supporting_units") or []
+                if answer and confidence is not None:
+                    supported = answer_supported(answer, supporting_units, indexed_units)
+                    check = {
+                        "answer": answer,
+                        "confidence": confidence,
+                        "supporting_units": supporting_units,
+                        "accepted": supported,
+                    }
+                    if supported:
+                        answer_output = nugget_answer_format.format(answer=answer, confidence=confidence)
+                    else:
+                        candidate = answer
         output_items.append(response_dict['output'][i])
-    return updated_nuggets, answer_output, output_items, token_info
+    return updated_nuggets, answer_output, candidate, check, output_items, token_info
 
 # TODO: make it so it connects to the decomp_query function tool
-def init_query_decomp(client: openai.OpenAI, query: str, args):
+def init_query_decomp(client: openai.OpenAI, query: str, args, phase_tokens=None):
     tools = [
         {
             "type": "function",
@@ -331,6 +394,7 @@ def init_query_decomp(client: openai.OpenAI, query: str, args):
             total_tokens += usage.total_tokens
             input_tokens += usage.input_tokens
             output_tokens += usage.output_tokens
+            add_phase_tokens(phase_tokens, "decomp", {'total_tokens': usage.total_tokens, 'input_tokens': usage.input_tokens, 'output_tokens': usage.output_tokens})
             response_dict = response.model_dump(mode="python")
             decomp = []
             for i in range(len(response_dict['output'])):
@@ -363,6 +427,8 @@ def run_conversation_with_tools(
     nuggets: list = [],
     max_iterations: int = 100,
     verbose: bool = True,
+    phase_tokens: dict | None = None,
+    nugget_checks: list | None = None,
 ):
 
     tool_usage = {}
@@ -388,6 +454,7 @@ def run_conversation_with_tools(
             total_tokens += usage.total_tokens
             input_tokens += usage.input_tokens
             output_tokens += usage.output_tokens
+            add_phase_tokens(phase_tokens, "main", {'total_tokens': usage.total_tokens, 'input_tokens': usage.input_tokens, 'output_tokens': usage.output_tokens})
         except Exception as e:
             if verbose:
                 print(f"Error: {e}")
@@ -457,8 +524,10 @@ def run_conversation_with_tools(
                 
                 if tool_call["name"]=="search":
                     # print("Query Text @ Line461:", qtext)
-                    updated_nuggets, early_answer, nug_output, nug_token_info = nugget_update_and_check(client, qtext, result, nuggets, args)
+                    updated_nuggets, early_answer, candidate, check, nug_output, nug_token_info = nugget_update_and_check(client, qtext, result, nuggets, args, phase_tokens)
                     nuggets = updated_nuggets
+                    if check is not None and nugget_checks is not None:
+                        nugget_checks.append({"phase": "main", **check})
                     copy_messages.extend(nug_output)
                     total_tokens += nug_token_info['total_tokens']
                     input_tokens += nug_token_info['input_tokens']
@@ -467,6 +536,8 @@ def run_conversation_with_tools(
                         "search output": json.loads(result),
                         "gathered nuggets": nuggets,
                     }
+                    if candidate:
+                        new_output["unverified candidate answer"] = candidate
                     new_messages.append(
                         {
                             "type": "function_call_output",
@@ -540,6 +611,8 @@ def _persist_response(
     *,
     query_id: str | None = None,
     elapsed_seconds: float = 0,
+    phase_tokens: dict | None = None,
+    nugget_checks: list | None = None,
 ):
     os.makedirs(out_dir, exist_ok=True)
 
@@ -634,6 +707,8 @@ def _persist_response(
         "input_tokens": token_counts['input_tokens'],
         "output_tokens": token_counts['output_tokens'],
         "elapsed_seconds": elapsed_seconds,
+        "phase_tokens": phase_tokens,
+        "nugget_checks": nugget_checks or [],
     }
 
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
@@ -692,18 +767,21 @@ def _process_tsv_dataset(
         solved = None
         elapsed_seconds = 0
         start_time = time.perf_counter()
+        phase_tokens = new_phase_tokens()
+        nugget_checks = []
         decomp_outputs = []
         decomp_token_infos = {'total_tokens': 0, 'input_tokens': 0, 'output_tokens': 0}
-        query_decomp, decomp_output, decomp_token_info = init_query_decomp(client, qtext, args)
-        
-        # print("DECOMPED QUERY=====\n"+str(query_decomp)+"\n=====")
-        
+        query_decomp, decomp_output, decomp_token_info = init_query_decomp(client, qtext, args, phase_tokens)
+
         decomp_token_infos['total_tokens'] += decomp_token_info['total_tokens']
         decomp_token_infos['input_tokens'] += decomp_token_info['input_tokens']
         decomp_token_infos['output_tokens'] += decomp_token_info['output_tokens']
         decomp_outputs.extend(decomp_output)
-        all_nuggets = []
-        # print(query_decomp)
+
+        # Search every subquery first, then run a single nugget call over the
+        # deduplicated union of passages instead of one call per subquery.
+        pooled_results = []
+        seen_docids = set()
         for idx, sub_q in enumerate(query_decomp):
             sub_results = tool_handler._search(sub_q)
             decomp_outputs.append({
@@ -723,13 +801,24 @@ def _process_tsv_dataset(
                 'type': 'function_call_output',
                 'status': None
             })
-            # print("Query Text @ Line702:", sub_q)
-            nuggets, early_answer, nug_output, nug_token_info = nugget_update_and_check(client, qtext, sub_results, all_nuggets, args)
+            for cand in json.loads(sub_results):
+                if cand["docid"] not in seen_docids:
+                    seen_docids.add(cand["docid"])
+                    pooled_results.append(cand)
+
+        all_nuggets = []
+        candidate = None
+        if pooled_results:
+            nuggets, early_answer, candidate, check, nug_output, nug_token_info = nugget_update_and_check(
+                client, qtext, json.dumps(pooled_results, indent=2), all_nuggets, args, phase_tokens
+            )
             decomp_token_infos['total_tokens'] += nug_token_info['total_tokens']
             decomp_token_infos['input_tokens'] += nug_token_info['input_tokens']
             decomp_token_infos['output_tokens'] += nug_token_info['output_tokens']
             decomp_outputs.extend(nug_output)
             all_nuggets = nuggets
+            if check is not None:
+                nugget_checks.append({"phase": "decomp", **check})
             if early_answer:
                 elapsed_seconds = time.perf_counter() - start_time
                 decomp_outputs.append({
@@ -737,13 +826,22 @@ def _process_tsv_dataset(
                     "content": [{'type': 'output_text', 'text':early_answer}]
                 })
                 solved = True
-                break
-        
+
+        user_prompt = format_query(qtext, args.query_template)
+        if candidate:
+            # Hand a rejected early answer to the main agent as a hypothesis to verify.
+            gathered = "\n".join(f"- {n}" for n in all_nuggets)
+            user_prompt += (
+                "\n\nInformation gathered so far:\n" + gathered
+                + f"\n\nUnverified candidate answer: {candidate}\n"
+                "This candidate is not yet supported by the gathered information. Verify it with the search tool before accepting it."
+            )
+
         initial_request = {
             "model": args.model,
             "max_output_tokens": args.max_tokens,
             "input": [
-                {"role": "user", "content": format_query(qtext, args.query_template)}
+                {"role": "user", "content": user_prompt}
             ],
             "tools": tool_handler.get_tool_definitions(),
             "truncation": "auto",
@@ -756,12 +854,14 @@ def _process_tsv_dataset(
                 if pbar:
                     pbar.set_postfix(completed=completed_count[0])
             _persist_response(
-                out_dir, initial_request, decomp_outputs, {}, decomp_token_infos, "completed", query_id=qid, elapsed_seconds=elapsed_seconds
+                out_dir, initial_request, decomp_outputs, {}, decomp_token_infos, "completed", query_id=qid,
+                elapsed_seconds=elapsed_seconds, phase_tokens=phase_tokens, nugget_checks=nugget_checks
             )
         else:
             try:
                 messages, tool_usage, status, token_counts = run_conversation_with_tools(
-                    client, initial_request, tool_handler, qtext, args, all_nuggets, args.max_iterations, args.verbose
+                    client, initial_request, tool_handler, qtext, args, all_nuggets, args.max_iterations, args.verbose,
+                    phase_tokens=phase_tokens, nugget_checks=nugget_checks
                 )
                 elapsed_seconds = time.perf_counter() - start_time
 
@@ -776,7 +876,8 @@ def _process_tsv_dataset(
                 token_counts['input_tokens'] += decomp_token_infos['input_tokens']
                 token_counts['output_tokens'] += decomp_token_infos['output_tokens']
                 _persist_response(
-                    out_dir, initial_request, messages, tool_usage, token_counts, status, query_id=qid, elapsed_seconds=elapsed_seconds
+                    out_dir, initial_request, messages, tool_usage, token_counts, status, query_id=qid,
+                    elapsed_seconds=elapsed_seconds, phase_tokens=phase_tokens, nugget_checks=nugget_checks
                 )
 
             except Exception as exc:
@@ -843,6 +944,18 @@ def main():
         type=int,
         default=100,
         help="Max conversation rounds with function calls",
+    )
+    parser.add_argument(
+        "--max-nugget-adds",
+        type=int,
+        default=5,
+        help="Max information units kept from a single nugget update call",
+    )
+    parser.add_argument(
+        "--max-nuggets",
+        type=int,
+        default=15,
+        help="Max information units kept in the gathered list (oldest dropped first)",
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     parser.add_argument(
