@@ -210,8 +210,11 @@ Given a query, a list of search passages, and a numbered list of information uni
 1. Review the new passages in relation to the query and report ONLY the changes to the existing list of information units. Do not repeat units that are unchanged.
 - 'add': new units from the passages that bring us closer to answering the query. Add at most {max_adds} units.
 - Each added unit must be a single fact of at most 25 words, ending with the docid of its source passage in square brackets, e.g. "Jane Doe was born in 1994 [12345_0]".
-- 'remove': indices of existing units that are now irrelevant or redundant.
-- To correct an existing unit, remove it and add the corrected version.
+- Copy names, titles, numbers and dates exactly as written in the passage (same spelling, accents, hyphenation and units). Never paraphrase or approximate them.
+- When a passage names a possible answer to the query, add a candidate unit of at most 40 words in the form "Candidate <exact name> [docid]: satisfies <conditions>; contradicts <conditions>; unverified <conditions>", listing the query's conditions by short description.
+- Keep candidates that satisfy only some conditions. A new candidate appearing is not a reason to remove an existing one.
+- 'remove': indices of existing units that are duplicated, or candidates that the passages show contradict a condition of the query.
+- To correct an existing unit or update a candidate's conditions, remove it and add the updated version.
 - If no changes are needed, return empty lists for 'add' and 'remove'.
 
 2. Once the changes are applied, assess whether the information units are collectively sufficient to fully and confidently answer the original query.

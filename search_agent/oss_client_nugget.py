@@ -169,8 +169,20 @@ def apply_nugget_changes(current_nuggets, changes, max_adds, max_nuggets):
         if unit and unit not in updated:
             updated.append(unit)
     if len(updated) > max_nuggets:
+        # Drop the oldest plain facts first so partially verified candidates survive.
+        overflow = len(updated) - max_nuggets
+        drop = set()
+        for i, unit in enumerate(updated):
+            if len(drop) == overflow:
+                break
+            if not is_candidate_unit(unit):
+                drop.add(i)
+        updated = [n for i, n in enumerate(updated) if i not in drop]
         updated = updated[-max_nuggets:]
     return updated, indexed_units
+
+def is_candidate_unit(unit):
+    return unit.lstrip().lower().startswith("candidate")
 
 _ANSWER_STOPWORDS = {"the", "a", "an", "of", "and"}
 
@@ -217,14 +229,16 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
                         "description": (
                             f"At most {args.max_nugget_adds} new information units from the search results "
                             "relevant to the original query. Each is one fact of at most 25 words ending "
-                            "with its source docid in square brackets. Do not repeat existing units."
+                            "with its source docid in square brackets, or a candidate unit of at most 40 words "
+                            "('Candidate <exact name> [docid]: satisfies ...; contradicts ...; unverified ...'). "
+                            "Copy names, numbers and dates exactly. Do not repeat existing units."
                         ),
                     },
                     "remove": {
                         "type": "array",
                         "items": {"type": "integer"},
                         "description": (
-                            "Indices of existing units that are irrelevant or redundant."
+                            "Indices of existing units that are duplicated, or candidates contradicted by the passages."
                         ),
                     },
                     "can_answer": {
