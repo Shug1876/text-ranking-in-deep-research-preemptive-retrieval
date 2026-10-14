@@ -22,7 +22,7 @@ K1=0.9
 B=0.4
 
 NUM_THREADS=100
-EVAL_NUM_THREADS=5
+EVAL_NUM_THREADS=50
 REASONING_EFFORT=medium
 K=5
 MAX_TOKENS=40000
@@ -117,7 +117,7 @@ python scripts_evaluation/evaluate_run.py \
   --qrel_evidence ./topics-qrels/qrel_evidence.txt \
   --tensor_parallel_size 2 \
   --num-threads ${EVAL_NUM_THREADS} \
-  --no_judge
+  # --no_judge
 
 python scripts_evaluation/count_complete.py \
   --input_dir ${OUT_DOC_DIR}

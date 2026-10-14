@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -136,7 +137,21 @@ class SearchToolHandler:
             return json.dumps({"error": f"Document with docid '{docid}' not found"})
         return json.dumps(result, indent=2)
 
-nugget_answer_format = """Explanation:  \n{explanation}\n\nExact Answer: {answer}  \nConfidence: {confidence}%"""
+nugget_answer_format = """Exact Answer: {answer}  \nConfidence: {confidence}%"""
+
+def apply_nugget_changes(current_nuggets, changes):
+    """Apply add/remove/amend changes (indices refer to current_nuggets) and return a new list."""
+    nuggets = list(current_nuggets or [])
+    for edit in changes.get("amend") or []:
+        idx = edit.get("index")
+        if isinstance(idx, int) and 0 <= idx < len(nuggets) and edit.get("text"):
+            nuggets[idx] = edit["text"]
+    remove = {i for i in changes.get("remove") or [] if isinstance(i, int)}
+    nuggets = [n for i, n in enumerate(nuggets) if i not in remove]
+    for unit in changes.get("add") or []:
+        if unit and unit not in nuggets:
+            nuggets.append(unit)
+    return nuggets
 
 def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str, current_nuggets, args):
     """
@@ -151,20 +166,41 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
             "type": "function",
             "name": "update_nuggets_and_check",
             "description": (
-                "Update the list of information units given new evidence, "
+                "Report changes to the list of information units given new evidence, "
                 "then determine whether they collectively answer the original query."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "units": {
+                    "add": {
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "The revised, deduplicated list of information units relevant "
-                            "to the original query. Add new units from the search results, "
-                            "remove units that are irrelevant or superseded, and amend units "
-                            "that can be made more precise."
+                            "New information units from the search results relevant to the "
+                            "original query. Do not repeat existing units."
+                        ),
+                    },
+                    "remove": {
+                        "type": "array",
+                        "items": {"type": "integer"},
+                        "description": (
+                            "Indices of existing units that are irrelevant, redundant, or superseded."
+                        ),
+                    },
+                    "amend": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "index": {"type": "integer"},
+                                "text": {"type": "string"},
+                            },
+                            "required": ["index", "text"],
+                            "additionalProperties": False,
+                        },
+                        "description": (
+                            "Replacement text for existing units, by index. Only amend when the "
+                            "new evidence materially refines or corrects a unit."
                         ),
                     },
                     "can_answer": {
@@ -179,25 +215,18 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
                         "type": "string",
                         "description": (
                             "The exact answer to the original query derived from the units. "
-                            "Only populate this field if can_answer is 'yes', otherwise leave empty."
-                        ),
-                    },
-                    "explanation": {
-                        "type": "string",
-                        "description": (
-                            "Your explanation for your final answer. "
-                            "Only populate this field if can_answer is 'yes', otherwise leave empty."
+                            "Only populate this field if can_answer is 'yes'."
                         ),
                     },
                     "confidence": {
                         "type": "number",
                         "description": (
                             "Your confidence in your final answer, must be an integer value between 0 and 100. "
-                            "Only populate this field if can_answer is 'yes', otherwise leave empty."
+                            "Only populate this field if can_answer is 'yes'."
                         ),
                     },
                 },
-                "required": ["units", "can_answer", "answer", "explanation", "confidence"],
+                "required": ["add", "remove", "amend", "can_answer"],
                 "additionalProperties": False,
             },
             "strict": True,
@@ -205,7 +234,7 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
     ]
     prompt = format_query(
         query,
-        "NUGGET_UPDATE_AND_CHECK_PROMPT",
+        "NUGGET_DELTA_UPDATE_AND_CHECK_PROMPT",
         add_info={'docs': search_text, 'current_units': current_nuggets}
     )
     request = {
@@ -216,7 +245,7 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
         ],
         'tools': tools,
         "truncation": "auto",
-        "reasoning": {"effort": 'medium', "summary": "detailed"},
+        "reasoning": {"effort": 'low', "summary": "detailed"},
     }
     response = None
     while response is None:
@@ -246,84 +275,14 @@ def nugget_update_and_check(client: openai.OpenAI, query: str, search_text: str,
                     'status': None
                 }
             parsed_args = json.loads(response_dict['output'][i]['arguments'])
-            updated_nuggets = parsed_args.get("units", current_nuggets)
+            updated_nuggets = apply_nugget_changes(current_nuggets, parsed_args)
             if parsed_args.get("can_answer")=="yes":
                 answer = parsed_args.get("answer") or None
-                explanation = parsed_args.get("explanation") or None
                 confidence = parsed_args.get("confidence") or None
-                if answer and explanation and confidence:
-                    answer_output = nugget_answer_format.format(answer=answer, explanation=explanation, confidence=confidence)
+                if answer and confidence:
+                    answer_output = nugget_answer_format.format(answer=answer, confidence=confidence)
         output_items.append(response_dict['output'][i])
     return updated_nuggets, answer_output, output_items, token_info
-
-
-def nugget_extract(client: openai.OpenAI, query: str, text: str, units, args):
-    tools = [
-        {
-            "type": "function",
-            "name": "unit_extract",
-            "description": "Formats the extracted units.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "units": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "An updated array of identified units of information.",
-                    },
-                },
-                "required": ["units"],
-            },
-        },
-    ]
-    total_tokens = 0
-    input_tokens = 0
-    output_tokens = 0
-    prompt = format_query(query, "NUGGET_EXTRACT_PROMPT", add_info=text)
-    initial_request = {
-        "model": args.model,
-        "max_output_tokens": args.max_tokens,
-        "input": [
-            {"role": "user", "content": prompt}
-        ],
-        'tools': tools,
-        "truncation": "auto",
-        "reasoning": {"effort": 'medium', "summary": "detailed"},
-    }
-    output = []
-    response = None
-    nuggets = []
-    # print("Query:", query)
-    # print("Original Units:", units)
-    while response is None:
-        try:
-            response = client.responses.create(
-                **initial_request,
-            )
-            usage = response.usage
-            total_tokens += usage.total_tokens
-            input_tokens += usage.input_tokens
-            output_tokens += usage.output_tokens
-            response_dict = response.model_dump(mode="python")
-            for i in range(len(response_dict['output'])):
-                if response_dict['output'][i]['type'] == 'mcp_call' or response_dict['output'][i]['type'] == 'function_call':
-                    if response_dict['output'][i]['type'] == 'mcp_call':
-                        # TODO: upstream vLLM bug outputs mcp_call but only accepts function_call as input
-                        # Convert mcp_call to function_call format
-                        response_dict['output'][i] = {
-                            'id': response_dict['output'][i]['id'],
-                            'call_id': response_dict['output'][i]['id'],  # function_call uses call_id
-                            'arguments': response_dict['output'][i]['arguments'],
-                            'name': response_dict['output'][i]['name'],
-                            'type': 'function_call',
-                            'status': None
-                        }
-                    nuggets = json.loads(response_dict['output'][i]['arguments'])['units']
-                output.append(response_dict['output'][i])
-            # print("Updated Units List:", nuggets)
-            return nuggets, output, {'total_tokens': total_tokens, 'input_tokens': input_tokens, 'output_tokens': output_tokens}
-        except:
-            response = None
 
 # TODO: make it so it connects to the decomp_query function tool
 def init_query_decomp(client: openai.OpenAI, query: str, args):
@@ -341,8 +300,10 @@ def init_query_decomp(client: openai.OpenAI, query: str, args):
                         "description": "An array of identified subqueries.",
                     },
                 },
-                "required": ["units"],
+                "required": ["subqueries"],
+                "additionalProperties": False,
             },
+            "strict": True,
         },
     ]
     total_tokens = 0
@@ -497,7 +458,6 @@ def run_conversation_with_tools(
                 if tool_call["name"]=="search":
                     # print("Query Text @ Line461:", qtext)
                     updated_nuggets, early_answer, nug_output, nug_token_info = nugget_update_and_check(client, qtext, result, nuggets, args)
-                    # new_nuggets, nug_output, nug_token_info = nugget_extract(client, qtext, result, nuggets, args)
                     nuggets = updated_nuggets
                     copy_messages.extend(nug_output)
                     total_tokens += nug_token_info['total_tokens']
@@ -579,6 +539,7 @@ def _persist_response(
     status: str,
     *,
     query_id: str | None = None,
+    elapsed_seconds: float = 0,
 ):
     os.makedirs(out_dir, exist_ok=True)
 
@@ -672,6 +633,7 @@ def _persist_response(
         "total_tokens": token_counts['total_tokens'],
         "input_tokens": token_counts['input_tokens'],
         "output_tokens": token_counts['output_tokens'],
+        "elapsed_seconds": elapsed_seconds,
     }
 
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
@@ -728,7 +690,8 @@ def _process_tsv_dataset(
         """Build request, send and persist response for one query."""
 
         solved = None
-
+        elapsed_seconds = 0
+        start_time = time.perf_counter()
         decomp_outputs = []
         decomp_token_infos = {'total_tokens': 0, 'input_tokens': 0, 'output_tokens': 0}
         query_decomp, decomp_output, decomp_token_info = init_query_decomp(client, qtext, args)
@@ -768,6 +731,7 @@ def _process_tsv_dataset(
             decomp_outputs.extend(nug_output)
             all_nuggets = nuggets
             if early_answer:
+                elapsed_seconds = time.perf_counter() - start_time
                 decomp_outputs.append({
                     "type": "message",
                     "content": [{'type': 'output_text', 'text':early_answer}]
@@ -792,13 +756,14 @@ def _process_tsv_dataset(
                 if pbar:
                     pbar.set_postfix(completed=completed_count[0])
             _persist_response(
-                out_dir, initial_request, decomp_outputs, {}, decomp_token_infos, "completed", query_id=qid
+                out_dir, initial_request, decomp_outputs, {}, decomp_token_infos, "completed", query_id=qid, elapsed_seconds=elapsed_seconds
             )
         else:
             try:
                 messages, tool_usage, status, token_counts = run_conversation_with_tools(
                     client, initial_request, tool_handler, qtext, args, all_nuggets, args.max_iterations, args.verbose
                 )
+                elapsed_seconds = time.perf_counter() - start_time
 
                 if status == "completed":
                     with completed_lock:
@@ -811,7 +776,7 @@ def _process_tsv_dataset(
                 token_counts['input_tokens'] += decomp_token_infos['input_tokens']
                 token_counts['output_tokens'] += decomp_token_infos['output_tokens']
                 _persist_response(
-                    out_dir, initial_request, messages, tool_usage, token_counts, status, query_id=qid
+                    out_dir, initial_request, messages, tool_usage, token_counts, status, query_id=qid, elapsed_seconds=elapsed_seconds
                 )
 
             except Exception as exc:

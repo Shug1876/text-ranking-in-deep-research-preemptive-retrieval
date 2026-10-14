@@ -6,6 +6,7 @@ import csv
 import json
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -264,6 +265,7 @@ def _persist_response(
     status: str,
     *,
     query_id: str | None = None,
+    elapsed_seconds: float = 0,
 ):
     os.makedirs(out_dir, exist_ok=True)
 
@@ -357,6 +359,7 @@ def _persist_response(
         "total_tokens": token_counts['total tokens'],
         "input_tokens": token_counts['input tokens'],
         "output_tokens": token_counts['output tokens'],
+        "elapsed_seconds": elapsed_seconds,
     }
 
     ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S%fZ")
@@ -424,9 +427,11 @@ def _process_tsv_dataset(
         }
 
         try:
+            start_time = time.perf_counter()
             messages, tool_usage, status, token_counts = run_conversation_with_tools(
                 client, initial_request, tool_handler, args.max_iterations, args.verbose
             )
+            elapsed_seconds = time.perf_counter() - start_time
 
             if status == "completed":
                 with completed_lock:
@@ -435,7 +440,7 @@ def _process_tsv_dataset(
                         pbar.set_postfix(completed=completed_count[0])
 
             _persist_response(
-                out_dir, initial_request, messages, tool_usage, token_counts, status, query_id=qid
+                out_dir, initial_request, messages, tool_usage, token_counts, status, query_id=qid, elapsed_seconds=elapsed_seconds
             )
 
         except Exception as exc:
@@ -599,12 +604,14 @@ def main():
         "reasoning": {"effort": args.reasoning_effort, "summary": "detailed"},
     }
 
+    start_time = time.perf_counter()
     messages, tool_usage, status = run_conversation_with_tools(
         client, initial_request, tool_handler, args.max_iterations, args.verbose
     )
+    elapsed_seconds = time.perf_counter() - start_time
 
     _persist_response(
-        args.output_dir, initial_request, messages, tool_usage, status, query_id=None
+        args.output_dir, initial_request, messages, tool_usage, status, query_id=None, elapsed_seconds=elapsed_seconds
     )
 
     rprint(messages)

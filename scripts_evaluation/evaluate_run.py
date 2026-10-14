@@ -387,6 +387,7 @@ def save_detailed_csv(all_results: List[dict], output_dir: Path):
             "num_citations",
             "precision_positives",
             "recall_positives",
+            "elapsed_seconds",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -425,6 +426,7 @@ def save_detailed_csv(all_results: List[dict], output_dir: Path):
                     "num_citations": len(citations.get("cited_docids", [])),
                     "precision_positives": metrics.get("precision", 0),
                     "recall_positives": metrics.get("recall", 0),
+                    "elapsed_seconds": result.get("elapsed_seconds", 0),
                 }
             )
 
@@ -480,6 +482,7 @@ def evaluate_item(item, qrel_evidence, df_answers, client, args, eval_lock):
         'total_tokens': item['total_tokens'],
         'input_tokens': item['input_tokens'],
         'output_tokens': item['output_tokens'],
+        'elapsed_seconds': item.get('elapsed_seconds', 0),
         'F1': f1_score,
         'EM': em_score,
         'BERTScore': bertscore,
@@ -685,6 +688,7 @@ def main():
         total_tokens = run_data['total_tokens']
         input_tokens = run_data['input_tokens']
         output_tokens = run_data['output_tokens']
+        elapsed_seconds = run_data.get('elapsed_seconds')
 
         if response == "" or not is_completed:
             result = {
@@ -711,7 +715,8 @@ def main():
                 },
                 'total_tokens': total_tokens,
                 'input_tokens': input_tokens,
-                'output_tokens': output_tokens
+                'output_tokens': output_tokens,
+                'elapsed_seconds': elapsed_seconds
             }
             try:
                 with eval_path.open("w", encoding="utf-8") as f:
@@ -736,7 +741,8 @@ def main():
                 "judge_prompt": judge_prompt,
                 'total_tokens': total_tokens,
                 'input_tokens': input_tokens,
-                'output_tokens': output_tokens
+                'output_tokens': output_tokens,
+                'elapsed_seconds': elapsed_seconds
             }
         )
 
@@ -910,6 +916,18 @@ def main():
         float(np.mean(out_tokens)) if len(out_tokens) > 0 else None
     )
 
+    elapsed_times = [
+        r.get("elapsed_seconds")
+        for r in all_results
+        if isinstance(r.get("elapsed_seconds"), (int, float))
+    ]
+    elapsed_seconds_avg = (
+        float(np.mean(elapsed_times)) if len(elapsed_times) > 0 else None
+    )
+    elapsed_seconds_total = (
+        float(np.sum(elapsed_times)) if len(elapsed_times) > 0 else None
+    )
+
     total = len(all_results)
     correct_count = sum(
         1 for r in all_results if r.get("judge_result", {}).get("correct", False)
@@ -951,6 +969,17 @@ def main():
         if isinstance(out_tokens_avg, (int, float))
         else None
     )
+
+    elapsed_seconds_avg_rounded = (
+        round(elapsed_seconds_avg, 4)
+        if isinstance(elapsed_seconds_avg, (int, float))
+        else None
+    )
+    elapsed_seconds_total_rounded = (
+        round(elapsed_seconds_total, 4)
+        if isinstance(elapsed_seconds_total, (int, float))
+        else None
+    )
     
     calibration_err_percent = (
         round(calibration_error, 2)
@@ -973,6 +1002,7 @@ def main():
         total_tokens = r.get("total_tokens", 0.0)
         input_tokens = r.get("input_tokens", 0.0)
         output_tokens = r.get("output_tokens", 0.0)
+        elapsed_seconds = r.get("elapsed_seconds")
         recall_val_percent = (
             round(recall_val * 100.0, 2)
             if isinstance(recall_val, (int, float))
@@ -994,6 +1024,7 @@ def main():
                 'total_tokens': total_tokens,
                 'input_tokens': input_tokens,
                 'output_tokens': output_tokens,
+                'elapsed_seconds': elapsed_seconds,
                 "tool_calls": dict(tool_counts),
             }
         )
@@ -1055,6 +1086,8 @@ def main():
         'Total Tokens': ttl_tok_percent,
         'Input Tokens': inp_tok_percent,
         'Output Tokens': out_tok_percent,
+        'Avg Elapsed (s)': elapsed_seconds_avg_rounded,
+        'Total Elapsed (s)': elapsed_seconds_total_rounded,
         "avg_tool_stats": all_tool_counts,
         "Calibration Error (%)": calibration_err_percent,
         "Retriever": "BM25",
